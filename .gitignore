@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.tsbuildinfo
+coverage/
+eval/results/
+.sift/.cache/
+.sift/models.local.yaml

@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "paths": {
+      "@sift/core": ["./packages/core/src/index.ts"],
+      "@sift/adapter-typescript": ["./packages/adapter-typescript/src/index.ts"],
+      "@sift/provider-claude-code": ["./packages/provider-claude-code/src/index.ts"]
+    }
+  },
+  "include": ["packages/*/src/**/*.ts", "vitest.config.ts"]
+}

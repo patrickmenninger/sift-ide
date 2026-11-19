@@ -1,0 +1,25 @@
+{
+  "name": "sift",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "tsc -b --clean",
+    "typecheck": "tsc -p tsconfig.test.json",
+    "test": "vitest run",
+    "verify": "npm run build && npm run typecheck && npm test",
+    "test:watch": "vitest",
+    "sift": "node packages/cli/dist/main.js"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "6.0.3",
+    "vitest": "^5.1.1"
+  }
+}

@@ -68,6 +68,8 @@ Package dependencies enforce the boundary: `core` depends on neither `adapter-ty
 
 Libraries: `typescript` (compiler API), `yaml` (formatting-preserving Document API), `vitest` (tests), `commander` (CLI). No others without a reason.
 
+`typescript` is pinned to **6.0.x**. TypeScript 7 (the native compiler) does not ship the JavaScript compiler API (`ts.createProgram`, the type checker) that the TS adapter is built on. Moving to 7 waits until it offers an equivalent API; the adapter boundary keeps that change contained to one package.
+
 ## 3. Language Adapter Interface
 
 All adapter output is plain, serializable data.

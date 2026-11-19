@@ -1,0 +1,16 @@
+{
+  "name": "@sift/cli",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The sift command.",
+  "type": "module",
+  "bin": {
+    "sift": "./dist/main.js"
+  },
+  "main": "./dist/program.js",
+  "types": "./dist/program.d.ts",
+  "dependencies": {
+    "@sift/core": "0.0.0",
+    "commander": "^15.1.0"
+  }
+}
