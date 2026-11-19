@@ -1,0 +1,8 @@
+include:
+  - "src/**"
+exclude:
+  - "**/*.test.*"
+provider: claude-code
+concurrency: 4
+lite:
+  maxStatements: 3

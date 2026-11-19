@@ -1,0 +1,99 @@
+# What a correct description of each bank-app unit must contain (design §13.2).
+# mustMention: ideas the description must convey (matched by an AI judge, so paraphrases count).
+# mustWarn / mustNotWarn: warning kinds that must / must not be raised.
+fixture: bank-app
+units:
+  - unit: src/accounts/account-service.ts#AccountService.transferFunds
+    mustMention:
+      - gets the source account
+      - stops with a forbidden error if the user does not own the source account
+      - gets the destination account
+      - subtracts the amount from the source and adds it to the destination
+      - saves both accounts
+      - emits a transfer completed event
+      - returns both new balances and the completion time
+    mustWarn: [missing-transaction, missing-check, unawaited-promise]
+    mustNotWarn: [missing-auth]
+
+  - unit: src/accounts/account-service.ts#AccountService.deposit
+    mustMention:
+      - rejects amounts that are zero or negative, or above 100,000 dollars
+      - adds the amount to the balance and saves the account
+    mustWarn: [comment-contradicts-code]
+
+  - unit: src/accounts/account-service.ts#AccountService.withdraw
+    mustMention:
+      - checks the user owns the account
+      - subtracts the amount and saves the account
+    mustWarn: [missing-check]
+    mustNotWarn: [missing-auth]
+
+  - unit: src/accounts/account-service.ts#AccountService.totalBalance
+    mustMention:
+      - lists the owner's accounts
+      - adds up their balances
+    mustNotWarn: [missing-transaction]
+
+  - unit: src/accounts/account-service.ts#AccountService.lowBalanceAccounts
+    mustMention:
+      - goes through each of the owner's accounts
+      - collects the IDs of accounts below the threshold
+
+  - unit: src/accounts/prisma-account-repository.ts#PrismaAccountRepository.getAccount
+    mustMention:
+      - looks up the account by ID in the database
+      - not found error if it does not exist
+    mustNotWarn: [missing-auth, missing-transaction]
+
+  - unit: src/http/routes.ts#getBalanceHandler
+    mustMention:
+      - gets the balance of the account in the URL
+      - responds with the balance
+    mustWarn: [missing-auth]
+
+  - unit: src/http/routes.ts#createRouter
+    mustMention:
+      - POST /transfers authenticates the user, performs the transfer, and responds with the confirmation
+      - maps errors to an HTTP status
+      - GET /accounts/:id/balance
+
+  - unit: src/http/routes.ts#statusFor
+    mustMention:
+      - 400 for validation errors, 403 for forbidden, 404 for not found, otherwise 500
+
+  - unit: src/auth/auth-service.ts#AuthService.authenticate
+    mustMention:
+      - forbidden if there is no token
+      - asks the identity service who the token belongs to
+      - forbidden if the token is invalid or the service is unavailable
+
+  - unit: src/notifications/notifier.ts#onTransferCompleted
+    mustMention:
+      - appends a line to the transfer log file
+      - retries up to three times
+      - gives up silently after three failures
+
+  - unit: src/accounts/money.ts#applyMonthlyInterest
+    mustMention:
+      - repeats once per month
+      - interest rounded down to whole cents
+
+  - unit: src/accounts/money.ts#formatCents
+    lite: true
+    mustMention:
+      - formats cents as a dollar string
+
+  - unit: src/app.ts#<module>
+    mustMention:
+      - logs completed transfers when the transfer completed event fires
+      - starts the HTTP server on port 3000
+
+  - unit: src/ui/balance-card.tsx#BalanceCard
+    mustMention:
+      - shows the formatted balance
+      - labels it as low balance when highlighted
+
+  - unit: src/legacy/report.js#summarize
+    mustMention:
+      - counts accounts and distinct owners
+      - totals the balances

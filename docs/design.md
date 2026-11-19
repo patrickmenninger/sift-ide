@@ -80,7 +80,7 @@ interface LanguageAdapter {
   extensions: string[];                        // [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"]
 
   /** Load the project (tsconfig/jsconfig, or defaults). Called once. */
-  openProject(root: string, files: string[]): Promise<AdapterProject>;
+  openProject(root: string, files: string[], options?: { liteMaxStatements?: number }): Promise<AdapterProject>;
 }
 
 interface AdapterProject {
@@ -131,7 +131,7 @@ interface CallSite {
   target: SymbolRef | null;                    // resolved declaration, or null
   confidence: "resolved" | "language-server" | "name-match" | null;   // how target was found
   implementations: SymbolRef[];                // if target is an interface/abstract member
-  external: { module: string; name: string } | null;   // e.g. { module: "@prisma/client", name: "account.update" }
+  external: { module: string; name: string } | null;   // e.g. { module: "@prisma/client", name: "Prisma.AccountDelegate.update" }
   awaited: boolean;
   args: CallArg[];                             // simplified arguments, for edge rules (§9.1)
   range: SourceRange;
@@ -139,7 +139,8 @@ interface CallSite {
 
 type CallArg =
   | { kind: "string"; value: string }
-  | { kind: "unit"; ref: SymbolRef }           // reference to a function, or an inline callback unit
+  | { kind: "unit"; ref: SymbolRef }           // reference to a named project function or method
+  | { kind: "callback"; key: string }          // inline function: its callback node's key in this unit
   | { kind: "unknown" };
 
 interface SymbolRef { file: string; symbol: string; }
@@ -150,19 +151,37 @@ interface SourceRange { start: { line: number; col: number }; end: { line: numbe
 
 The adapter turns a unit's body into a tree of statement-level nodes. Expressions are not split further; a node is a statement or a control-flow construct.
 
-Each node has a **structural key**: its path in the tree. Top-level statements are `"0"`, `"1"`, …; children are addressed by role, e.g. `"2.then.0"`, `"2.else.1"`, `"4.body.0"`, `"5.try.0"`, `"5.catch.0"`. Inline callbacks become `callback` nodes under the statement that contains them (`"3.cb0.0"`), so their bodies can be covered by the enclosing step.
+Each node has a **structural key**: its path in the tree. Top-level statements are `"0"`, `"1"`, …; children are addressed by role:
+
+| Construct | Node keys |
+|---|---|
+| `if` / `else` | `if` node `k`; then-statements `k.then.i`; an `else` node `k.else` with statements `k.else.i` (an `else if` is an `if` node at `k.else.0`) |
+| Loops (`for`, `for…of`, `for…in`, `while`, `do…while`) | `loop` node `k`; body `k.body.i` |
+| `try` | `try` node `k`; statements `k.try.i`; `catch` node `k.catch` with `k.catch.i`; `finally` node `k.finally` with `k.finally.i` |
+| `switch` | `switch` node `k`; `case` nodes `k.caseN` (including `default`) with `k.caseN.i` |
+| Bare block `{ … }` | `statement` node `k`; contents `k.body.i` |
+| Inline function (callback, nested function) | `callback` node `k.cbN` under the node whose code contains it; its body `k.cbN.i` |
+
+Calls are attached to the node whose own code contains them: an `if` node holds the calls in its condition, not those in its branches, and calls inside an inline function belong to its `callback` node. Callback bodies can therefore be covered by the step that describes the enclosing statement.
 
 Keys are only meaningful against a specific `bodyHash`. When the hash changes, the unit is regenerated and keys are re-assigned (§7).
 
 ### 3.2 TypeScript Adapter Notes
 
-- Uses `ts.createProgram` with the project's `tsconfig.json` (or `jsconfig.json`; defaults with `allowJs` and `checkJs` if neither exists).
-- Units found: function declarations; `const x = function / arrow`; class methods, getters/setters, constructors; object-literal methods assigned to exported consts; default exports.
-- `component`: a function whose return type includes JSX.
-- `module`: top-level statements of a file that do more than declare/import (calls, registrations).
-- Types come from the type checker. `typeInferred: true` when the source has no annotation (always the case in plain JS without JSDoc).
-- Call resolution: `checker.getResolvedSignature` → declaration. If the declaration is an interface or abstract member, `findImplementations` searches the program for classes implementing it.
-- External calls: when the resolved declaration is in `node_modules` or a built-in lib, `external` is filled in with the module specifier and the member path.
+- **Program:** `ts.createProgram` with `tsconfig.json` or `jsconfig.json` from the project root only (never a parent directory's), plus any requested files. `noEmit` and `allowJs` are always forced on. Without a config, defaults are used (ES2022, bundler resolution, JSX preserved, strict).
+- **Units:** function declarations; `const x = function / arrow`; class methods, getters/setters (`Store.get size`), constructors (`Store.constructor`), and arrow-function properties; methods of object literals assigned to constants (`handlers.create`); default exports (`default`).
+- **`component`:** a function that returns JSX.
+- **`module`:** one unit per file (`<module>`) collecting top-level statements that do work: any statement other than imports, exports, and type declarations, and variable declarations whose initializer calls, constructs, or awaits something. Constants such as `const PORT = 3000` are not work.
+- **Names:** a unit's symbol is its qualified name in the file: classes, namespaces, and the owning variable of an object literal are included; nested local functions are not units (they are `callback` nodes).
+- **Types:** from annotations as written when present (`typeInferred: false`, including JSDoc types), otherwise from the type checker (`typeInferred: true`), which is always the case for unannotated JavaScript.
+- **Comments:** `docComment` holds only comments directly above the unit, with no blank line between, so a file header is not mistaken for a function's documentation.
+- **Call resolution** (`confidence: "resolved"`):
+  - Calls go through `checker.getResolvedSignature` to the declaration. `new X()` resolves to `X`'s own constructor, or to the class `X` when it has none; this avoids resolving to an inherited library constructor such as `Error`'s.
+  - If the declaration is an interface member or abstract method, `implementations` lists the class members that implement it. Only classes that name the interface or base class in `implements` / `extends` are found; purely structural implementations are not.
+  - A call through a function-typed variable or parameter (e.g. an event handler) is **unresolved**: `target` and `confidence` are null, never guessed.
+- **External calls:** a declaration outside the project's own source files (in `node_modules`, a `.d.ts` file, or the default library) is external. `module` is the ambient module name (`declare module "fs/promises"`), `"global"` for global declarations and the default library, or else the package name (`@types/x` maps to `x`). `name` is the declaration's qualified name inside that module, e.g. `Prisma.AccountDelegate.update`, `Router.post`, `Math.floor`. Rule packs match on these names (§9).
+- **Name matching** (`confidence: "name-match"`): only when the checker gives the callee type `any` (typically untyped JavaScript) and exactly one project unit has that simple name.
+- **Lite heuristic** (`isSmall`): at most `liteMaxStatements` structure nodes, no control flow, callbacks, or `throw`, and no external calls except into the language's standard library (`Math`, `Array`, `JSON`, …). Core can still override it once rule packs find effects.
 
 ## 4. Provider Interface
 
@@ -453,7 +472,7 @@ units:
 
 ### 6.4 Lite Units
 
-The adapter marks a unit `isSmall` when it has no control flow, no effects, no external calls, and at most 3 statements. Small units get a summary and input/return meanings, but no steps. Thresholds are configurable and tuned using the evaluation set.
+The adapter marks a unit `isSmall` when it has no control flow, no callbacks, no external calls outside the standard library, and at most 3 statements (§3.2); core clears the flag if rule packs find effects. Small units get a summary and input/return meanings, but no steps. Thresholds are configurable and tuned using the evaluation set.
 
 ### 6.5 Cache
 
@@ -578,15 +597,15 @@ version: 1
 appliesWhen:
   dependency: "@prisma/client"
 rules:
-  - match: { module: "@prisma/client", member: "*.{findUnique,findFirst,findMany,count,aggregate}" }
+  - match: { module: "@prisma/client", member: "Prisma.*Delegate.{findUnique,findFirst,findMany,count,aggregate}" }
     effect: db.read
-  - match: { module: "@prisma/client", member: "*.{create,createMany,update,updateMany,upsert,delete,deleteMany}" }
+  - match: { module: "@prisma/client", member: "Prisma.*Delegate.{create,createMany,update,updateMany,upsert,delete,deleteMany}" }
     effect: db.write
-  - match: { module: "@prisma/client", member: "$transaction" }
+  - match: { module: "@prisma/client", member: "PrismaClient.$transaction" }
     effect: db.transaction
 ```
 
-- `match.module` / `match.member` are matched against `CallSite.external`. Members use glob syntax with `{a,b}` alternatives; `*` matches one path segment (the model name).
+- `match.module` / `match.member` are matched against `CallSite.external`. `member` is the **declaration's** qualified name inside its module (§3.2), not the expression as written: `prisma.account.update(…)` is `Prisma.AccountDelegate.update`, whatever the variable is called. Members use glob syntax with `{a,b}` alternatives; `*` matches within one segment.
 - A rule can instead match internal symbols (`match: { symbol: "AuditLog.record" }`) so projects can tag their own wrappers.
 - `appliesWhen.dependency` enables the pack only when the project's `package.json` lists the dependency.
 
@@ -608,9 +627,9 @@ version: 1
 appliesWhen:
   dependency: "express"
 edges:
-  - match: { module: "express", member: "*.{get,post,put,patch,delete}" }
+  - match: { module: "express", member: "{Router,Application}.{get,post,put,patch,delete}" }
     edge: handles-route
-    from: { arg: -1 }            # handler = last argument
+    from: { arg: -1 }            # handler = last argument: a function reference or an inline callback
     route: { method: member, path: { arg: 0 } }
 ```
 
@@ -742,7 +761,7 @@ models:                         # optional, committed: shared by the team (§4.2
 
 ### 13.1 Fixture: `eval/fixtures/bank-app`
 
-A small TypeScript + Prisma + Express application written for evaluation:
+A small TypeScript + Prisma + Express application written for evaluation. It only needs to type-check, never to run: Prisma, Express, and JSX are stubbed with ambient declarations in `types/`, so the fixture needs no install or code generation. Its README lists the planted problems and the shapes it covers.
 
 - `AccountService` (transfer, deposit, withdraw, list), `AccountRepository` interface with `PrismaAccountRepository` and `InMemoryAccountRepository`.
 - `AuthService` with an authentication check.
@@ -753,13 +772,20 @@ A small TypeScript + Prisma + Express application written for evaluation:
 
 ### 13.2 Expectations
 
-`eval/expectations/*.yaml`, per unit:
+`eval/expectations/<fixture>.yaml`, one entry per unit, keyed by `file#symbol`:
 
 ```yaml
-unit: AccountService.transferFunds
-mustMention: ["source account", "destination account", "forbidden"]
-mustWarn: [missing-transaction, missing-check]
-mustNotWarn: [missing-auth]
+fixture: bank-app
+units:
+  - unit: src/accounts/account-service.ts#AccountService.transferFunds
+    mustMention:                 # ideas, matched by the judge, so paraphrases count
+      - stops with a forbidden error if the user does not own the source account
+      - saves both accounts
+    mustWarn: [missing-transaction, missing-check, unawaited-promise]
+    mustNotWarn: [missing-auth]
+  - unit: src/accounts/money.ts#formatCents
+    lite: true                   # expected to be a lite unit
+    mustMention: [formats cents as a dollar string]
 ```
 
 ### 13.3 Metrics

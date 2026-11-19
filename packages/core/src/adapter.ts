@@ -9,7 +9,12 @@ export interface LanguageAdapter {
   /** e.g. [".ts", ".tsx", ".js"] */
   extensions: string[];
   /** Load the project (tsconfig/jsconfig or defaults). Called once per run. */
-  openProject(root: string, files: string[]): Promise<AdapterProject>;
+  openProject(root: string, files: string[], options?: AdapterOptions): Promise<AdapterProject>;
+}
+
+export interface AdapterOptions {
+  /** Statement limit for the lite-unit heuristic (design §6.4). Default 3. */
+  liteMaxStatements?: number;
 }
 
 export interface AdapterProject {
@@ -91,7 +96,10 @@ export interface CallSite {
 
 export type CallArg =
   | { kind: "string"; value: string }
+  /** A reference to a named function or method in the project. */
   | { kind: "unit"; ref: SymbolRef }
+  /** An inline function, identified by its `callback` structure node key in the same unit. */
+  | { kind: "callback"; key: string }
   | { kind: "unknown" };
 
 export interface SymbolRef {

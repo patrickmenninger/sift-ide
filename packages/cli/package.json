@@ -10,6 +10,7 @@
   "main": "./dist/program.js",
   "types": "./dist/program.d.ts",
   "dependencies": {
+    "@sift/adapter-typescript": "0.0.0",
     "@sift/core": "0.0.0",
     "commander": "^15.1.0"
   }

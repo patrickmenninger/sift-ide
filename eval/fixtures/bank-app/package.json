@@ -1,0 +1,10 @@
+{
+  "name": "bank-app",
+  "private": true,
+  "type": "module",
+  "description": "Sift evaluation fixture. Dependencies are listed for rule-pack detection but stubbed in types/, never installed.",
+  "dependencies": {
+    "@prisma/client": "^6.0.0",
+    "express": "^5.0.0"
+  }
+}
