@@ -39,6 +39,8 @@ export interface ModelChoice {
 }
 
 export interface CompletionRequest {
+  /** Lets a caller cancel the request (for example on Ctrl+C). */
+  signal?: AbortSignal;
   task: Task;
   model: ModelChoice;
   /** e.g. "describe@3"; recorded with every result. */
@@ -51,8 +53,10 @@ export interface CompletionRequest {
 }
 
 export interface CompletionResult {
-  /** Parsed JSON; core validates it against the schema. */
+  /** Parsed JSON, or undefined if the response was not JSON; core validates it against the schema. */
   json: unknown;
+  /** The raw response text, for error messages when it could not be parsed. */
+  text?: string;
   usage: { inputTokens?: number; outputTokens?: number; costUsd?: number };
   model: string;
   durationMs: number;

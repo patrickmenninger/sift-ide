@@ -16,6 +16,9 @@
     },
     {
       "path": "../adapter-typescript"
+    },
+    {
+      "path": "../provider-claude-code"
     }
   ]
 }

@@ -12,10 +12,18 @@ import {
   RuleSet,
   SiftError,
   siftPathFor,
+  generate,
+  loadLocalOverrides,
+  loadModelMap,
+  Router,
+  TASKS,
   type CodeGraph,
+  type Provider,
   type LanguageAdapter,
 } from "@sift/core";
 import { typescriptAdapter } from "@sift/adapter-typescript";
+import { claudeCodeProvider } from "@sift/provider-claude-code";
+import { renderGenerateReport, renderModels, renderPlan } from "./generate-render.js";
 import { renderCallees, renderCallers, renderImpact } from "./graph-render.js";
 import { renderSift, renderStructure } from "./render.js";
 
@@ -66,15 +74,30 @@ const processIO: CliIO = {
 
 /** Commands that exist in the design but arrive in later milestones. */
 const PLANNED: { name: string; args?: string; summary: string; availableIn: string }[] = [
-  { name: "generate", args: "[paths...]", summary: "Write or update .sift files for source files", availableIn: "milestone 6" },
   { name: "status", summary: "List stale, new, deleted, and unverified units", availableIn: "milestone 7" },
   { name: "check", summary: "Exit non-zero if any .sift file is stale or missing (for CI and hooks)", availableIn: "milestone 7" },
   { name: "eval", summary: "Run the evaluation harness", availableIn: "milestone 8" },
-  { name: "models", summary: "Show task, tier, and model routing", availableIn: "milestone 6" },
   { name: "qualify", args: "<provider:model>", summary: "Test a model and assign it a tier", availableIn: "the bring-your-own-key providers" },
 ];
 
-export function buildProgram(io: CliIO = processIO): Command {
+/** Things tests replace: the AI provider, and where the exit code for "finished with problems" goes. */
+export interface CliDeps {
+  provider?: Provider;
+  state?: { exitCode: number };
+}
+
+function providerFor(name: string, deps: CliDeps): Provider {
+  if (deps.provider) return deps.provider;
+  if (name === "claude-code") return claudeCodeProvider;
+  throw new SiftError("CONFIG_INVALID", `Unknown provider "${name}" in sift.config.yaml. Available: claude-code.`);
+}
+
+async function routerFor(root: string, provider: string, config: Parameters<typeof generate>[0]["config"]): Promise<{ router: Router; local: boolean }> {
+  const local = await loadLocalOverrides(root);
+  return { router: new Router(await loadModelMap(provider), config, local), local: local !== null };
+}
+
+export function buildProgram(io: CliIO = processIO, deps: CliDeps = {}): Command {
   const program = new Command();
   program
     .name("sift")
@@ -120,7 +143,7 @@ export function buildProgram(io: CliIO = processIO): Command {
         if (!stored) {
           throw new SiftError(
             "SOURCE_NOT_FOUND",
-            `${sourcePath} has no description yet (${siftPathFor(sourcePath)} does not exist). "sift generate" creates it (milestone 6); "sift show --structure" works now.`,
+            `${sourcePath} has no description yet (${siftPathFor(sourcePath)} does not exist). Run "sift generate ${sourcePath}" to create it.`,
           );
         }
         const units = symbol === undefined ? stored.file.units : stored.file.units.filter((u) => u.symbol === symbol);
@@ -225,6 +248,68 @@ export function buildProgram(io: CliIO = processIO): Command {
     io.out(lines.join("\n"));
   });
 
+  program
+    .command("generate [paths...]")
+    .description("Describe source units that have no description yet, and write their .sift files")
+    .option("--dry-run", "list the units that would be described, and the models, without calling the AI")
+    .option("--force", "describe units again even if they already have a description (IDs are kept)")
+    .option("--full-hash", "hash every file instead of trusting size and modification time")
+    .option("--json", "print the run report as JSON")
+    .action(async (paths: string[], opts: { dryRun?: boolean; force?: boolean; fullHash?: boolean; json?: boolean }, cmd: Command) => {
+      const project = await loadProject(cwdOf(cmd));
+      const loaded = await loadRulePacks(project.root, { builtinDir: builtinRulesDir() });
+      const provider = providerFor(project.config.provider, deps);
+      const { router, local } = await routerFor(project.root, provider.id, project.config);
+      const cwd = resolve(cwdOf(cmd));
+      const projectPaths = paths.map((p) => toProjectPath(project.root, resolve(cwd, p)));
+
+      if (!opts.dryRun && !opts.json) {
+        io.out(
+          provider.capabilities.local
+            ? `Using ${provider.id}; code stays on this machine.`
+            : `Using ${provider.id}: the code of each unit is sent to Anthropic through Claude Code, on your own login.`,
+        );
+        if (local) io.out("Personal model overrides from .sift/models.local.yaml are in use.");
+      }
+      const report = await generate({
+        root: project.root,
+        config: project.config,
+        adapters: ADAPTERS,
+        rules: new RuleSet(loaded.packs),
+        provider,
+        router,
+        paths: projectPaths,
+        force: opts.force === true,
+        dryRun: opts.dryRun === true,
+        fullHash: opts.fullHash === true || process.env.SIFT_FULL_HASH === "1",
+        onEvent: opts.json
+          ? undefined
+          : (e) => {
+              if (e.type === "start") io.out(`Describing ${e.units} unit${e.units === 1 ? "" : "s"} in ${e.files} file${e.files === 1 ? "" : "s"}…`);
+              else if (e.type === "described") {
+                const notes = [e.attempts > 1 ? "after a retry" : "", e.stale ? "incomplete, marked stale" : ""].filter(Boolean).join(", ");
+                io.out(`  ✓ ${e.unit}  ${e.task} · ${e.model} · ${(e.durationMs / 1000).toFixed(1)}s${notes ? ` · ${notes}` : ""}`);
+              } else if (e.type === "failed") io.out(`  ✗ ${e.unit}: ${e.reason}`);
+              else io.out(`  ! ${e.model} is used instead of the ${e.from} tier: ${e.reason}`);
+            },
+      });
+      if (opts.json) io.out(JSON.stringify(report, null, 2));
+      else io.out(opts.dryRun ? renderPlan(report) : renderGenerateReport(report));
+      if (report.failed.length > 0 && deps.state) deps.state.exitCode = EXIT.problems;
+    });
+
+  program
+    .command("models")
+    .description("Show which model each task uses: task → tier → model, with overrides")
+    .option("--json", "print raw JSON")
+    .action(async (opts: { json?: boolean }, cmd: Command) => {
+      const project = await loadProject(cwdOf(cmd));
+      const providerId = deps.provider?.id ?? project.config.provider;
+      const { router, local } = await routerFor(project.root, providerId, project.config);
+      const routes = TASKS.map((t) => router.route(t));
+      io.out(opts.json ? JSON.stringify({ provider: providerId, localOverrides: local, routes }, null, 2) : renderModels(providerId, routes, local));
+    });
+
   for (const planned of PLANNED) {
     const cmd = program.command(planned.args ? `${planned.name} ${planned.args}` : planned.name);
     cmd.description(`${planned.summary} (not available yet)`).allowUnknownOption();
@@ -287,11 +372,12 @@ function cwdOf(cmd: Command): string {
 }
 
 /** Run the CLI and return the exit code. Never throws. */
-export async function run(argv: string[], io: CliIO = processIO): Promise<number> {
-  const program = buildProgram(io);
+export async function run(argv: string[], io: CliIO = processIO, deps: Omit<CliDeps, "state"> = {}): Promise<number> {
+  const state = { exitCode: EXIT.ok as number };
+  const program = buildProgram(io, { ...deps, state });
   try {
     await program.parseAsync(argv, { from: "user" });
-    return EXIT.ok;
+    return state.exitCode;
   } catch (err) {
     if (err instanceof CommanderError) {
       // Help and --version end with exitCode 0; usage errors were already printed by commander.

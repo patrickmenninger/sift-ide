@@ -115,3 +115,30 @@ async function extract(
   }
   return results;
 }
+
+/**
+ * Extractions for the given files at their current hashes (as recorded by `refreshGraph`): from the
+ * cache when possible, otherwise extracted with one project per adapter.
+ */
+export async function loadExtractions(
+  options: Pick<RefreshOptions, "root" | "config" | "adapters">,
+  graph: CodeGraph,
+  files: string[],
+): Promise<Map<string, FileExtraction>> {
+  const { root, config, adapters } = options;
+  const cache = new SiftCache(root);
+  const all = graph.files;
+  const hashes = new Map(all.map((f) => [f, graph.data.files[f]!.fileHash]));
+  const result = new Map<string, FileExtraction>();
+  const missing: string[] = [];
+  for (const f of files) {
+    const adapter = adapters.find((a) => a.extensions.includes(extname(f).toLowerCase()));
+    const cached = adapter && hashes.has(f) ? await cache.getExtraction(f, hashes.get(f)!, adapter.id) : null;
+    if (cached) result.set(f, cached);
+    else missing.push(f);
+  }
+  if (missing.length > 0) {
+    for (const e of await extract(root, config, cache, adapters, all, hashes, missing, new Set())) result.set(e.path, e);
+  }
+  return result;
+}

@@ -7,6 +7,9 @@ export type SiftErrorCode =
   | "UNSUPPORTED_FILE"
   | "RULES_INVALID"
   | "GIT_FAILED"
+  | "PROVIDER_FAILED"
+  | "PROVIDER_AUTH"
+  | "MODEL_UNAVAILABLE"
   | "NOT_IMPLEMENTED";
 
 /** An expected failure with a message fit to show the user as-is. */

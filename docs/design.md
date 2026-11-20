@@ -210,6 +210,7 @@ interface CompletionRequest {
   prompt: string;
   jsonSchema: object;                          // expected output shape
   maxOutputTokens?: number;
+  signal?: AbortSignal;                        // cancel the request
 }
 
 type Task = "describe" | "describe-lite" | "update" | "context-check" | "judge";
@@ -222,7 +223,8 @@ interface ModelChoice {
 }
 
 interface CompletionResult {
-  json: unknown;                               // parsed; validated by core
+  json: unknown;                               // parsed; validated by core; undefined if the reply was not JSON
+  text?: string;                               // raw reply, for error messages
   usage: { inputTokens?: number; outputTokens?: number; costUsd?: number };
   model: string;
   durationMs: number;
@@ -231,12 +233,20 @@ interface CompletionResult {
 
 ### 4.1 Claude Code Provider
 
-- Spawns `claude -p` with the prompt on stdin, JSON output format, and **tools disabled** (the model should only read the prompt, never act on the repository). Exact flags are verified against the installed Claude Code version during implementation and wrapped in one place.
-- Runs with the working directory set to an empty temp folder so no project files or settings are picked up implicitly.
-- Parses the JSON envelope, extracts the model's response, then parses the response as JSON. Responses are validated by core against the schema; invalid output gets **one** retry that includes the validation errors.
-- Passes the routed model and effort level to `claude -p` (model selection flag; effort, if the installed version exposes it). Flags are verified against the installed version, as above.
-- Concurrency limit (default 4) and a per-call timeout.
-- Records usage for cost reporting. On a subscription, cost figures are estimates for comparison, not a bill; usage limits are the real constraint, which is another reason to route simple tasks to small models.
+Implemented in `packages/provider-claude-code` and checked against Claude Code 2.1:
+
+```text
+claude -p --output-format json --model <model> [--effort <level>]
+       --system-prompt-file <tmp>/system.md --tools "" --setting-sources ""
+       --strict-mcp-config --no-session-persistence
+```
+
+- The prompt goes in on stdin; the system prompt (instructions and examples) through a file, since it is too long for some shells. **No tools** (the model only reads the prompt, never acts on the repository), **no setting sources and no MCP servers**, and the working directory is an empty temp folder, so nothing from the project or the user's configuration is picked up. `--bare` would be stricter but only accepts API keys, not a subscription login.
+- The JSON envelope is parsed; the reply is `structured_output` when present, otherwise the JSON object found in `result` (whole text, fenced block, or outermost braces). A reply that is not JSON comes back with `json: undefined` and is treated as a validation failure (one retry).
+- `--json-schema` (native schema enforcement) is supported by the provider but off (`nativeJsonSchema: false`) until it has been verified with the recursive step schema on real runs; the schema is described in the prompt instead (§4.3).
+- Errors are mapped so core can act on them: a login problem is `PROVIDER_AUTH` and stops the whole run with "run `claude` and log in"; an unavailable model is `MODEL_UNAVAILABLE` and triggers routing fallback (§4.2); anything else fails only that unit.
+- Per-call timeout (10 minutes); concurrency is limited by core (`concurrency`, default 4). `SIFT_CLAUDE_COMMAND` overrides the executable.
+- Records usage for cost reporting (input tokens include cache reads and writes). On a subscription, cost figures are estimates for comparison, not a bill; usage limits are the real constraint, which is another reason to route simple tasks to small models.
 
 A `FakeProvider` that returns canned responses is used for engine tests.
 
@@ -266,8 +276,8 @@ fallback: { frontier: [mid], mid: [small] }
 ```
 
 - Mapping files for other providers are added with each provider, filled from that provider's evaluation results (§13.4).
-- If a model is unavailable (plan, region, or key permissions), core walks the `fallback` list and reports the substitution in the run summary. Falling below a task's minimum tier produces a warning and is recorded in the unit's provenance.
-- Users override either lookup in `sift.config.yaml` (§12): pin a task to a specific model, or remap a tier.
+- If a model is unavailable (plan, region, or key permissions), core walks the `fallback` list and reports the substitution in the run summary. The substitution is remembered for the rest of the run, so the unavailable model is tried once. Running below the recommended tier is recorded in the unit's provenance (`belowTier`); below the minimum tier is also reported in the run summary.
+- Users override either lookup in `sift.config.yaml` (§12): move a task to another tier, or remap a tier to another model. Personal overrides use the same `tasks`/`tiers` shape in `.sift/models.local.yaml` and win over the config. `sift models` shows the result and where each choice came from.
 - A model that is not in a shipped mapping (for example, a local model) is `unqualified` until `sift qualify` (§4.4) assigns it a tier.
 
 ### 4.3 Bring-Your-Own-Key Providers
@@ -521,7 +531,15 @@ It is purely a speed-up: deleting it never loses information, because everything
 11. Report      counts, failures, warnings, tokens/cost
 ```
 
-Units in the same strongly connected component (recursion) are described together in one prompt, with each other's signatures but no summaries.
+Units in the same strongly connected component (recursion) are described in the same round: each sees the others' signatures but not their summaries. (Describing a component in a single prompt is deferred until the evaluation shows it helps.)
+
+**Milestone 6 scope.** `generate` describes units that have no description yet. A unit whose symbol already has one is kept as it is, and reported if its code changed since; updating it is sync (milestone 7). `--force` describes kept units again, keeping their IDs. `.sift` units whose symbol no longer exists are left in place for sync. Details:
+
+- **IDs up front.** Every new unit gets its ID before any prompt is sent, so a step can refer to a callee described later in the same run.
+- **Ordering.** Components are scheduled callees-first and run concurrently up to `concurrency`; a caller waits only for its own callees.
+- **fileHash.** A `.sift` file's `fileHash` is updated only when every unit in it matches the current source; otherwise it keeps the old value, so the fast "nothing changed" check never hides a stale unit.
+- **Failures** never block other units. A unit that fails is not written; the run exits with code 1.
+- `--dry-run` lists each unit with its task and model without calling the AI.
 
 ### 7.2 Identity Matching
 
@@ -543,14 +561,14 @@ When a unit's `summary` changes, each caller's `contextHash` changes. Callers ar
 
 ### 7.4 Prompts
 
-Both prompts ask for JSON matching a schema; core converts it to YAML.
+Both prompts ask for JSON matching a schema; core converts it to YAML. The prompt files are `packages/core/prompts/describe.md` and `describe-lite.md` (lite units: summary, inputs, returns, and warnings only, no structure keys). The user prompt is generated (`core/describe-input.ts`): parameter names in backticks with their types, the code with key markers, a list of every key with its kind and detected effects, and each call with its key, target, signature, summary, implementations, and effects. Code and doc comments pass through secret filtering (§11) first.
 
 **Describe (new unit)** — inputs:
 - Unit source, with each structure node labelled by its key as a comment-like marker, e.g. `/*[3]*/ await this.repo.save(from);`.
 - Signature, input/return types (marking inferred types).
 - Callee list: signature + summary for internal callees; module + member for external ones.
 - Rule-pack effects detected per node.
-- Relevant type definitions (types of inputs/outputs, one level deep).
+- Relevant type definitions (types of inputs/outputs, one level deep). *Not yet included; added if the evaluation shows descriptions missing type information.*
 - Doc comment.
 - Style guide: middle-ground vocabulary, describe what the code does (not what it should do), one step per meaningful action, nest steps for control flow, cover every node, describe inline callbacks inside the enclosing step, mark external libraries by name.
 - Warning guide: list of warning kinds (missing-transaction, missing-check, missing-auth, unhandled-error, comment-contradicts-code, unawaited-promise, …), and an instruction to only warn on evidence from the code.
@@ -597,9 +615,13 @@ Run after every AI response, before anything is written:
 | **Coverage** | Every structure node is covered by some step (a parent's coverage includes its children). | Retry once; then write with `status: stale` and report `uncovered: [...]`. |
 | Kind consistency | A step of kind `if`/`loop`/`try` covers a node of that kind. | Retry once. |
 | Effects mentioned | Each node with an effect (db.write, net, fs.write, throws) is covered by a step. | Same as coverage. |
-| Inputs complete | `inputs` names match the signature exactly. | Retry once. |
+| Inputs complete | `inputs` names match the signature exactly (whitespace ignored, for destructuring patterns such as `{ a, b }`). | Retry once. |
+| Returns | `returns` is present when the unit returns something other than `void`. | Retry once. |
+| Warnings | Warning kinds are kebab-case and their `covers` keys exist. | Retry once. |
 
-Retries include the exact failures in the prompt. Failures after one retry never block other units.
+Implemented in `core/describe-output.ts`. Problems are phrased as instructions the model can act on (`steps[0] covers "9", which is not a structure key of this unit.`). Coverage reports only the outermost uncovered keys. Retries include the exact problems in the prompt. After the retry, a response whose only problem is coverage is written with `status: stale`; any other problem means the unit is not written. Failures never block other units.
+
+**Deriving the unit.** Each structure node belongs to the deepest step that covers it or its nearest covered ancestor. A step's `calls` are the call sites of the nodes it owns: the callee's unit ID, the IDs of every described implementation for a call to an interface member, or `ext:<module>#<name>` for a library. Its `effects` are those nodes' rule effects plus the direct effects of the project units they call (one level, not `throws`, §9). Warnings point at the steps owning their keys.
 
 ## 9. Framework Rule Packs
 
@@ -778,7 +800,7 @@ Queries say when a result may be incomplete, so a missing caller is never mistak
 Before any prompt is sent:
 
 - Files matching `.env*`, `*.pem`, `*.key`, and paths listed under `exclude` in `sift.config.yaml` are never read into prompts.
-- String literals in prompt source are scanned for known secret formats (cloud keys, tokens, private-key headers) and high-entropy strings of length ≥ 20; matches are replaced by `"<redacted>"`.
+- Prompt source and doc comments are scanned for known secret formats (AWS, GitHub, Anthropic/OpenAI-style, Slack, Google, Stripe keys, JWTs, private-key blocks), and string literals for high-entropy values (length ≥ 20, no spaces, not a path or URL, at least two character classes, ≥ 4 bits of entropy per character); matches are replaced by `"<redacted>"` (`core/redact.ts`).
 - The number of redactions is reported. Redaction never changes source files or hashes.
 
 ## 12. CLI
@@ -786,7 +808,7 @@ Before any prompt is sent:
 | Command | Does | AI calls |
 |---|---|---|
 | `sift init` | Creates `.sift/`, `sift.config.yaml`, adds `.sift/.cache/` and `.sift/models.local.yaml` to `.gitignore`. | No |
-| `sift generate [paths…]` | Runs the pipeline (§7) for the given files or the whole project. `--dry-run` shows what would change; `--force` regenerates even unchanged units. | Yes |
+| `sift generate [paths…]` | Runs the pipeline (§7) for the given files or folders, or the whole project. `--dry-run` lists units and models without calling the AI; `--force` describes units again, keeping IDs; `--json` prints the run report. Exits 1 if any unit failed. | Yes |
 | `sift status` | Lists stale, new, deleted, unverified, and failed-validation units. | No |
 | `sift check` | Like `status`, but exits non-zero if anything is stale or missing. For CI and hooks. | No |
 | `sift show <symbol\|file>` | Prints a readable rendering of a unit (nested outline, warnings). | No |
