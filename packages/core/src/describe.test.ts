@@ -205,7 +205,7 @@ describe("contextHashOf", () => {
 
 describe("prompt files", () => {
   it("have versions and load for both describe tasks", async () => {
-    expect((await loadPrompt("describe")).id).toBe("describe@1");
+    expect((await loadPrompt("describe")).id).toBe("describe@2");
     expect((await loadPrompt("describe-lite")).id).toBe("describe-lite@2");
     expect(() => parsePromptFile("describe", "no front matter")).toThrow("front matter");
   });

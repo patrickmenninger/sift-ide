@@ -80,7 +80,7 @@ describe("runEval", () => {
     expect(run!.churn!.rewordedUnrelated).toEqual([]);
 
     expect(result.judge).toEqual({ model: "claude-opus-5-5", selfGraded: true });
-    expect(result.prompts).toMatchObject({ describe: "describe@1", update: "update@1", judge: "judge@2" });
+    expect(result.prompts).toMatchObject({ describe: "describe@2", update: "update@2", judge: "judge@2" });
     expect(result.summary).toEqual([expect.objectContaining({ config: "recommended", runs: 1, coverage: 1, accuracy: 28 / 29, churn: run!.churn!.steps.rate })]);
     expect(lines.join("\n")).toContain("judging 29 descriptions with claude-opus-5-5…");
 

@@ -87,7 +87,7 @@ describe("sift generate", () => {
     expect(transfer).toMatchObject({
       status: "generated",
       effects: ["db.read", "db.write", "event.emit", "throws"],
-      generatedBy: { provider: "claude-code", model: "claude-opus-5-5", prompt: "describe@1", belowTier: false },
+      generatedBy: { provider: "claude-code", model: "claude-opus-5-5", prompt: "describe@2", belowTier: false },
     });
     expect(transfer.contextHash).toMatch(/^[0-9a-f]{16}$/);
     const saveFrom = transfer.steps.find((s) => s.covers.includes("5"))!;
@@ -198,7 +198,7 @@ describe("sift generate", () => {
 
     // The update prompt shows the previous description and the code change.
     const update = asked.find((q) => unitOf(q) === "applyMonthlyInterest")!;
-    expect(update.promptVersion).toBe("update@1");
+    expect(update.promptVersion).toBe("update@2");
     expect(update.prompt).toContain('"summary": "Does what applyMonthlyInterest does."');
     expect(update.prompt).toContain("-   const interest = Math.floor(");
     expect(update.prompt).toContain("+   const interest = Math.round(");
@@ -216,7 +216,7 @@ describe("sift generate", () => {
     const interest = unit(after.money, "applyMonthlyInterest");
     expect(interest.id).toBe(unit(before.money, "applyMonthlyInterest").id);
     expect(interest.steps.map((s) => s.id)).toEqual(unit(before.money, "applyMonthlyInterest").steps.map((s) => s.id));
-    expect(interest.generatedBy?.prompt).toBe("update@1");
+    expect(interest.generatedBy?.prompt).toBe("update@2");
     expect(after.money.units.map((u) => u.symbol)).toEqual(["formatCents", "applyMonthlyInterest"]);
     expect(unit(after.routes, "httpStatusFor").id).toBe(unit(before.routes, "statusFor").id);
     const routerCalls = unit(after.routes, "createRouter").steps.flatMap(function all(s): string[] {
@@ -277,7 +277,7 @@ describe("sift generate", () => {
     expect(r.out).toContain("! claude-sonnet-5-5 is used instead of the frontier tier: no access to opus");
     expect(provider.requests.filter((q) => q.model.model === "claude-opus-5-5")).toHaveLength(1);
     const unit = (await readSiftFile(dir, "src/accounts/money.ts"))!.file.units.find((u) => u.symbol === "applyMonthlyInterest")!;
-    expect(unit.generatedBy).toEqual({ provider: "claude-code", model: "claude-sonnet-5-5", prompt: "describe@1", belowTier: true });
+    expect(unit.generatedBy).toEqual({ provider: "claude-code", model: "claude-sonnet-5-5", prompt: "describe@2", belowTier: true });
   }, 60_000);
 
   it("stops when Claude Code is not logged in, without writing anything", async () => {
