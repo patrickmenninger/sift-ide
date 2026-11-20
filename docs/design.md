@@ -59,7 +59,10 @@ sift/
 ├── eval/
 │   ├── fixtures/bank-app/     # evaluation codebase
 │   ├── expectations/          # what each unit must mention / warn about
-│   └── harness/               # runs generation + scoring
+│   ├── churn/                 # scripted edits for the churn metric
+│   ├── matrix.yaml            # configurations for `sift eval --matrix`
+│   ├── results/               # one JSON + Markdown file per evaluation run
+│   └── harness/               # @sift/eval: runs generation + scoring
 ├── docs/
 └── requirements.md
 ```
@@ -850,7 +853,7 @@ Before any prompt is sent:
 | `sift callers <symbol> [-d N]` | Units and routes that call it, with edge confidence, as a tree. | No |
 | `sift callees <symbol> [-d N]` | Units and library calls it makes, with effects (propagated one level), and its unresolved calls. | No |
 | `sift impact <symbol…> \| --diff <ref>` | Units, routes, and tests that may be affected by changing the given units, or by the changes since a git ref. | No |
-| `sift eval` | Runs the evaluation harness (§13). `--matrix` runs the model matrix (§13.4). | Yes |
+| `sift eval` | Runs the evaluation harness (§13) on a fixture from a Sift source checkout. `--matrix` runs the model matrix (§13.4); `--tier task=tier` runs one configuration; `--repeat N`; `--no-judge`, `--no-churn`, `--no-save`. | Yes |
 | `sift qualify <provider>:<model>` | Runs the qualification subset and assigns the model a tier (§4.4). | Yes |
 | `sift models` | Shows the active routing: task → tier → model, overrides, and qualified local models. | No |
 
@@ -910,14 +913,33 @@ units:
 | Missed effects | Effect-bearing nodes not covered. |
 | Expectation pass rate | `mustMention` (AI judge for paraphrases) + `mustWarn` / `mustNotWarn`. |
 | Accuracy | AI judge with a rubric (correct / minor issue / wrong), human spot checks. |
-| Churn | Run `generate --force` on unchanged code; then apply small scripted edits (rename a variable, add a log line, change a condition) and measure the fraction of unrelated steps whose text changed. Target: 0 for unchanged code. |
+| Churn | Apply small scripted edits (rename a variable, add a log line, change a condition), run sync, and measure the fraction of unrelated steps whose text changed. Target: 0 for unchanged code. |
 | Cost / latency | From provider usage. |
 
 Results are written to `eval/results/<timestamp>.json` with a short Markdown summary, so prompt changes can be compared run to run.
 
+**Implementation** (`eval/harness`, package `@sift/eval`). Each run works on a fresh temporary copy of the fixture, with its project rule packs but without descriptions or cache, so the fixture is never changed:
+
+1. **Generate** every unit with the configuration's routing.
+2. **Deterministic metrics.**
+   - Coverage: units written complete, of all units.
+   - Valid: units that passed validation, possibly stale.
+   - Valid on the first try.
+   - Missed effects: effect-bearing nodes, other than `log`, that no step covers.
+   - `mustWarn`, `mustNotWarn`, and `lite` checks.
+   - Warning count, and how many use the standard kinds.
+   - Cost per unit, and latency (mean and p95).
+3. **Judge** (`prompts/judge.md`, task `judge`: frontier tier, high effort). One call per described unit, with the same context the description writer had (the code with the comment above it, and each call with the callee's signature and summary or its implementations' summaries), the description as a reader sees it (no keys, IDs, or derived facts), and the unit's `mustMention` ideas. Without that context, the judge marks correct statements about comments and callees as unsupported; the first baseline run showed this, and its results were discarded. The reply is `{ ideas: [{ idea, present, where }], accuracy: correct | minor-issues | wrong, issues: [{ severity, text }] }`, validated with one retry. Accuracy is reported as *accurate* (correct) and *acceptable* (correct or minor issues). Without the judge, mentions and accuracy are reported as not scored.
+4. **Churn.** Apply `eval/churn/<fixture>.yaml` (each `from` must be found), run sync, and compare:
+   - In each updated unit, a step is *unaffected* when every node it covers has the same shape (tokens with identifiers replaced, so a renamed variable is not a change) somewhere in the new code. Churn is the share of unaffected steps that were reworded or dropped.
+   - Units whose code did not change but whose wording did (through context checks) are listed separately.
+   - The design's first idea, `generate --force` on unchanged code, measured describe-prompt randomness, not sync; plain `generate` on unchanged code makes no calls, so its churn is 0 by construction.
+
+The Markdown file has the §13.4 summary table, then per run: the expectations not met, validation problems, the judge's findings for every unit not judged correct, and every churned step with its text before and after.
+
 ### 13.4 Model Matrix
 
-`sift eval --matrix` runs every task's prompt across a set of models, each combination `--repeat N` times (default 3). The default set, `eval/matrix.yaml`:
+`sift eval --matrix` runs every task's prompt across a set of models, each combination `--repeat N` times (default 3). Each configuration in `eval/matrix.yaml` moves tasks to other tiers; describe and describe-lite are measured by the generate step, update and context-check by the churn step. Variance is the standard deviation of the expectation and accuracy rates across repeats. The default set:
 
 - For each task: its recommended tier and the next tier down, for every provider that has a key configured.
 - At least one capable local model through `openai-compatible`, once that provider exists.

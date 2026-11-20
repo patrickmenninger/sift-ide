@@ -1,0 +1,19 @@
+# Small scripted edits for the churn metric (design §13.3). After each run, the harness applies
+# these to its copy of the fixture, runs sync, and measures how much wording changed in steps
+# whose code did not change. Each `from` must occur in the file (all occurrences with `all: true`).
+fixture: bank-app
+edits:
+  - name: rename a variable
+    file: src/accounts/account-service.ts
+    replace:
+      - { from: "const to = await this.repo.getAccount(toId);", to: "const destination = await this.repo.getAccount(toId);" }
+      - { from: "to.balanceCents", to: "destination.balanceCents", all: true }
+      - { from: "await this.repo.save(to);", to: "await this.repo.save(destination);" }
+  - name: add a log line
+    file: src/accounts/account-service.ts
+    replace:
+      - { from: "    account.balanceCents -= amountCents;\n", to: "    account.balanceCents -= amountCents;\n    console.log(`withdrew ${amountCents} from ${accountId}`);\n" }
+  - name: change a condition
+    file: src/accounts/money.ts
+    replace:
+      - { from: "if (months <= 0) {", to: "if (months < 1) {" }

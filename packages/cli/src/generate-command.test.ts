@@ -311,6 +311,23 @@ describe("sift generate", () => {
   }, 60_000);
 });
 
+describe("sift eval", () => {
+  it("runs the harness on the fixture and prints the summary table", async () => {
+    const provider = new FakeProvider((req) => answer(req));
+    const r = await sift(provider, "eval", "--no-judge", "--no-churn", "--no-save", "--tier", "describe=mid");
+    expect(r.err).toBe("");
+    expect(r.code).toBe(EXIT.ok);
+    expect(r.out).toContain("Evaluating bank-app: describe=mid, 1 run each, no judge, no churn.");
+    expect(r.out).toContain("| describe=mid | claude-sonnet-5-5 / claude-haiku-5-5 / claude-opus-5-5 / claude-haiku-5-5 | 100% | 0 |");
+    expect(r.out).toContain("No judge: mentions and accuracy were not scored");
+    expect(provider.requests.filter((q) => q.task === "describe").every((q) => q.model.model === "claude-sonnet-5-5")).toBe(true);
+
+    const bad = await sift(provider, "eval", "--tier", "describe=huge");
+    expect(bad.code).toBe(EXIT.error);
+    expect(bad.err).toContain('--tier takes task=tier, such as describe=mid; got "describe=huge".');
+  }, 90_000);
+});
+
 describe("sift models", () => {
   it("shows task → tier → model with the source of each override", async () => {
     const dir = await fixtureCopy();

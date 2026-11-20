@@ -10,9 +10,10 @@ export default defineConfig({
       "@sift/core": pkg("core"),
       "@sift/adapter-typescript": pkg("adapter-typescript"),
       "@sift/provider-claude-code": pkg("provider-claude-code"),
+      "@sift/eval": fileURLToPath(new URL("./eval/harness/src/index.ts", import.meta.url)),
     },
   },
   test: {
-    include: ["packages/*/src/**/*.test.ts"],
+    include: ["packages/*/src/**/*.test.ts", "eval/harness/src/**/*.test.ts"],
   },
 });

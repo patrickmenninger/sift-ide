@@ -19,6 +19,9 @@
     },
     {
       "path": "../provider-claude-code"
+    },
+    {
+      "path": "../../eval/harness"
     }
   ]
 }

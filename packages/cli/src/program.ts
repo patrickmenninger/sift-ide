@@ -1,5 +1,7 @@
 import { createRequire } from "node:module";
 import { dirname, extname, join, relative, resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { Command, CommanderError } from "commander";
 import {
   gitDiff,
@@ -19,12 +21,14 @@ import {
   loadModelMap,
   Router,
   TASKS,
+  TIERS,
   type CodeGraph,
   type Provider,
   type LanguageAdapter,
 } from "@sift/core";
 import { typescriptAdapter } from "@sift/adapter-typescript";
 import { claudeCodeProvider } from "@sift/provider-claude-code";
+import { DEFAULT_CONFIG, loadMatrix, renderMarkdown, runEval, writeResults, type MatrixConfig } from "@sift/eval";
 import { renderGenerateReport, renderModels, renderPlan, renderStatus } from "./generate-render.js";
 import { renderCallees, renderCallers, renderImpact } from "./graph-render.js";
 import { renderSift, renderStructure } from "./render.js";
@@ -76,7 +80,6 @@ const processIO: CliIO = {
 
 /** Commands that exist in the design but arrive in later milestones. */
 const PLANNED: { name: string; args?: string; summary: string; availableIn: string }[] = [
-  { name: "eval", summary: "Run the evaluation harness", availableIn: "milestone 8" },
   { name: "qualify", args: "<provider:model>", summary: "Test a model and assign it a tier", availableIn: "the bring-your-own-key providers" },
 ];
 
@@ -336,6 +339,52 @@ export function buildProgram(io: CliIO = processIO, deps: CliDeps = {}): Command
       io.out(opts.json ? JSON.stringify({ provider: providerId, localOverrides: local, routes }, null, 2) : renderModels(providerId, routes, local));
     });
 
+  program
+    .command("eval")
+    .description("Run the evaluation harness on a fixture: generate, score against expectations, judge, and measure churn (from a Sift source checkout)")
+    .option("--fixture <name>", "fixture under eval/fixtures", "bank-app")
+    .option("--matrix", "run every configuration in eval/matrix.yaml")
+    .option("--repeat <n>", "runs per configuration (default 1, or 3 with --matrix)")
+    .option("--tier <task=tier...>", "run tasks on other tiers, e.g. --tier describe=mid")
+    .option("--no-judge", "skip the AI judge (no mention or accuracy scores)")
+    .option("--no-churn", "skip the churn edits")
+    .option("--eval-dir <dir>", "the eval folder (default: the one in this Sift checkout)")
+    .option("--no-save", "do not write eval/results/<timestamp>.json and .md")
+    .option("--json", "print the full results as JSON")
+    .action(async (opts: EvalOpts) => {
+      const evalDir = resolve(opts.evalDir ?? join(SOURCE_ROOT, "eval"));
+      if (!existsSync(join(evalDir, "fixtures"))) {
+        throw new SiftError("SOURCE_NOT_FOUND", `No evaluation fixtures in ${evalDir}. "sift eval" runs from a Sift source checkout, or with --eval-dir.`);
+      }
+      let configs: MatrixConfig[] = opts.matrix ? await loadMatrix(evalDir) : [DEFAULT_CONFIG];
+      if (opts.tier) configs = [{ name: opts.tier.join(","), tasks: parseTiers(opts.tier) }];
+      const repeat = opts.repeat === undefined ? (opts.matrix ? 3 : 1) : depthOf(opts.repeat);
+      const provider = providerFor("claude-code", deps);
+      const log = opts.json ? () => {} : (line: string) => io.out(line);
+      log(`Evaluating ${opts.fixture}: ${configs.map((c) => c.name).join(", ")}, ${repeat} run${repeat === 1 ? "" : "s"} each${opts.judge ? "" : ", no judge"}${opts.churn ? "" : ", no churn"}.`);
+      const result = await runEval({
+        evalDir,
+        fixture: opts.fixture,
+        adapters: ADAPTERS,
+        builtinRulesDir: builtinRulesDir(),
+        provider,
+        configs,
+        repeat,
+        judge: opts.judge,
+        churn: opts.churn,
+        ...(existsSync(join(SOURCE_ROOT, "node_modules")) ? { nodeModules: join(SOURCE_ROOT, "node_modules") } : {}),
+        onProgress: log,
+      });
+      const markdown = renderMarkdown(result);
+      const saved = opts.save ? await writeResults(join(evalDir, "results"), result, markdown) : null;
+      if (opts.json) {
+        io.out(JSON.stringify(result, null, 2));
+        return;
+      }
+      io.out(["", ...markdown.split("\n## ")[0]!.trimEnd().split("\n").slice(2)].join("\n"));
+      if (saved) io.out(`\nResults: ${relative(process.cwd(), saved.markdown)} (details per run) and ${relative(process.cwd(), saved.json)}`);
+    });
+
   for (const planned of PLANNED) {
     const cmd = program.command(planned.args ? `${planned.name} ${planned.args}` : planned.name);
     cmd.description(`${planned.summary} (not available yet)`).allowUnknownOption();
@@ -350,6 +399,33 @@ export function buildProgram(io: CliIO = processIO, deps: CliDeps = {}): Command
 interface GraphOpts {
   json?: boolean;
   fullHash?: boolean;
+}
+
+interface EvalOpts {
+  fixture: string;
+  matrix?: boolean;
+  repeat?: string;
+  tier?: string[];
+  judge: boolean;
+  churn: boolean;
+  evalDir?: string;
+  save: boolean;
+  json?: boolean;
+}
+
+/** The Sift checkout this CLI runs from (packages/cli/dist → the repository root). */
+const SOURCE_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
+
+function parseTiers(values: string[]): MatrixConfig["tasks"] {
+  const tasks: MatrixConfig["tasks"] = {};
+  for (const value of values) {
+    const [task, tier] = value.split("=");
+    if (!(TASKS as readonly string[]).includes(task ?? "") || !(TIERS as readonly string[]).includes(tier ?? "")) {
+      throw new SiftError("CONFIG_INVALID", `--tier takes task=tier, such as describe=mid; got "${value}".`, [`tasks: ${TASKS.join(", ")}`, `tiers: ${TIERS.join(", ")}`]);
+    }
+    tasks[task as (typeof TASKS)[number]] = tier as (typeof TIERS)[number];
+  }
+  return tasks;
 }
 
 /** The built-in rule packs shipped in @sift/rules. */

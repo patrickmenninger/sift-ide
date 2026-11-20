@@ -43,9 +43,9 @@ describe("sift CLI", () => {
   });
 
   it("explains when a command is not available yet", async () => {
-    const r = await sift("eval");
+    const r = await sift("qualify", "x:y");
     expect(r.code).toBe(EXIT.error);
-    expect(r.err).toContain('"sift eval" is not available yet; it arrives with milestone 8.');
+    expect(r.err).toContain('"sift qualify" is not available yet; it arrives with the bring-your-own-key providers.');
   });
 
   describe("show --structure", () => {

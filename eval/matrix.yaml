@@ -1,0 +1,8 @@
+# Configurations for `sift eval --matrix` (design §13.4): each task on its recommended tier, and
+# describe/update (the frontier tasks) one tier down. describe-lite and context-check are already
+# on the small tier. Tiers map to models through packages/core/models/<provider>.yaml.
+configs:
+  - name: recommended
+    tasks: {}
+  - name: describe-on-mid
+    tasks: { describe: mid, update: mid }
