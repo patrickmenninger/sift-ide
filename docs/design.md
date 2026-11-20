@@ -79,6 +79,9 @@ interface LanguageAdapter {
   id: string;                                  // "typescript"
   extensions: string[];                        // [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"]
 
+  /** File-level normalized hash (§5), equal to FileExtraction.fileHash. Runs without a project, for the fast path (§5.1). */
+  hashFile(path: string, text: string): string;
+
   /** Load the project (tsconfig/jsconfig, or defaults). Called once. */
   openProject(root: string, files: string[], options?: { liteMaxStatements?: number }): Promise<AdapterProject>;
 }
@@ -616,17 +619,31 @@ rules:
     effect: db.transaction
 ```
 
-- `match.module` / `match.member` are matched against `CallSite.external`. `member` is the **declaration's** qualified name inside its module (§3.2), not the expression as written: `prisma.account.update(…)` is `Prisma.AccountDelegate.update`, whatever the variable is called. Members use glob syntax with `{a,b}` alternatives; `*` matches within one segment.
-- A rule can instead match internal symbols (`match: { symbol: "AuditLog.record" }`) so projects can tag their own wrappers.
-- `appliesWhen.dependency` enables the pack only when the project's `package.json` lists the dependency.
+- `match.module` / `match.member` are matched against `CallSite.external`. `member` is the **declaration's** qualified name inside its module (§3.2), not the expression as written: `prisma.account.update(…)` is `Prisma.AccountDelegate.update`, whatever the variable is called. Both use glob syntax: `{a,b}` alternatives (which may be empty, as in `{,FileHandle.}readFile`), `*` within one segment (segments are `.` for members and `/` for modules), and `**` across segments. `member` may be omitted to match every member of a module.
+- A rule can instead match internal symbols (`match: { symbol: "AuditLog.record" }`) so projects can tag their own wrappers. Symbol rules never match library calls, and module rules never match project calls.
+- `appliesWhen.dependency` enables the pack only when the project's `package.json` lists the dependency (in any dependency section). Packs without it always apply.
+- Packs are validated strictly when loaded, and every problem is reported at once. Two packs with the same name are an error.
 
 Effect vocabulary (v0): `db.read`, `db.write`, `db.transaction`, `net.request`, `fs.read`, `fs.write`, `process.exec`, `event.emit`, `log`, `throws`.
 
-`throws` comes from `throw` statements, not rules.
+`throws` comes from `throw` statements, and a rule that tries to give it is rejected. `event.emit` comes from `emits` edge rules (§9.1).
 
-Built-in packs in Phase 1: `prisma`, `node-fs` (`fs`, `fs/promises`), `fetch` (global `fetch`), `express`. Project packs live in `.sift/rules/*.yaml` and are loaded after built-in ones.
+Built-in packs in Phase 1 (`packages/rules/packs/`):
 
-Effects propagate one level: if a step calls an internal unit whose `effects` include `db.write`, the step gets `db.write` too. This is what lets a service method show "writes to the database" when the actual Prisma call lives in a repository.
+| Pack | Applies when | Matches |
+|---|---|---|
+| `prisma` | `@prisma/client` is a dependency | Delegate reads and writes, `$transaction`, raw queries, in `@prisma/client` or `.prisma` |
+| `node-fs` | always | `fs`, `fs/promises` (and `node:` forms, `FileHandle` methods) → `fs.read` / `fs.write` |
+| `node-child-process` | always | `exec`, `execFile`, `spawn`, `fork`, and their sync forms → `process.exec` |
+| `fetch` | always | global `fetch` → `net.request` |
+| `console` | always | `console.log/info/warn/error/debug/trace` → `log` |
+| `express` | `express` is a dependency | `handles-route` edges (§9.1) |
+
+Project packs live in `.sift/rules/*.yaml` and are loaded after built-in ones. The graph records a hash of all applied packs; when any pack changes, every file's graph entry is rebuilt (from cached extractions, so this is cheap).
+
+**Propagation.** Effects propagate one level: if a step calls an internal unit whose direct `effects` include `db.write`, the step gets `db.write` too. A call to an interface member takes the effects of every implementation. This is what lets a service method show "writes to the database" when the actual Prisma call lives in a repository. `throws` is not propagated: an exception is described at the unit that throws it, and a caller's own `try`/`catch` steps say what happens to it.
+
+**Lite units.** Core clears the adapter's lite flag (§6.4) when a unit has any direct effect other than `log`.
 
 ### 9.1 Edge Rules
 
@@ -656,12 +673,13 @@ edges:
     from: { arg: 1 }
 ```
 
-- `from: { arg: n }` names the argument that holds the handler. It is resolved by the adapter to a unit if it is a function reference or inline function; `-1` means the last argument.
-- `emits` and `listens` edges with the same `key` are joined into `emits → listener` edges in the graph.
-- Arguments that are not literals or resolvable references produce no edge. Unresolved emit/route sites are recorded so the graph can report them as possible gaps (§10.3).
+- `from: { arg: n }` names the argument that holds the handler: a reference to a project function, or an inline callback; `-1` means the last argument.
+- `emits` edges point from the emitting unit to an event node (`event:<key>`), and `listens` edges point from the event node to the handler. Queries walk through the event node, so an emitter's callees include the listeners and a listener's callers include the emitters.
+- When the handler is an inline callback, the edge points at the unit that contains it and records the callback's structure key (`handlerKey`). Queries use it to tell routes apart: a route registered in `createRouter` is reached only through calls inside its own callback, not through other routes registered by the same function.
+- Arguments that are not literals or resolvable references produce no edge. Those sites are recorded as gaps (§10.3).
 - Edges from rules have confidence `rule`.
 
-This requires the adapter to report, for each call site, its arguments in a simple form: string literals, references to units, inline function units, or `unknown`. `CallSite` gains `args: CallArg[]`.
+This requires the adapter to report, for each call site, its arguments in a simple form: string literals, references to units, inline callbacks (by structure key), or `unknown` (`CallSite.args`).
 
 ## 10. Code Graph
 
@@ -669,63 +687,91 @@ A core module (`core/graph`) that holds every unit and the relationships between
 
 ### 10.1 Model
 
+Nodes are identified by strings:
+
+| ID | Node |
+|---|---|
+| `src/a.ts#Class.method` | A unit, or another project declaration such as an interface member or a class without a constructor |
+| `ext:<module>#<name>` | A library or platform API (the same form as `.sift` step calls) |
+| `route:<METHOD> <path>` | An HTTP route, from edge rules |
+| `event:<key>` | An event name, from edge rules |
+
 ```ts
-interface GraphNode {
-  unitId: string | null;                      // .sift unit id, once one exists
-  ref: SymbolRef;                             // file + symbol
-  kind: ExtractedUnit["kind"];
-  external?: { module: string; name: string };// external nodes (library calls)
-  route?: { method: string; path: string };   // for route handlers
+interface GraphFile {                         // one per source file
+  fileHash: string;
+  adapter: string;
+  units: { symbol: string; kind: UnitKind; range: SourceRange; lite: boolean; effects: Effect[] }[];
+  edges: GraphEdge[];                         // edges recorded in this file
+  gaps: GraphGap[];
 }
 
 interface GraphEdge {
-  from: SymbolRef;
-  to: SymbolRef;
-  kind: "calls" | "implements" | "uses-type" | "handles-route" | "emits" | "tests";
+  kind: "calls" | "implements" | "uses-type" | "handles-route" | "emits" | "listens";
+  from: string;
+  to: string;
   confidence: "resolved" | "language-server" | "rule" | "name-match" | "inferred";
-  sites: { file: string; stepKey?: string; range: SourceRange }[];   // where in the code
+  sites: { stepKey?: string; range: SourceRange }[];   // one per call site
+  effects?: Effect[];                                   // calls: what the rule packs give the call
+  handlerKey?: string;                                  // handles-route, listens: inline callback (§9.1)
 }
 ```
+
+`units[].effects` are the unit's **direct** effects; propagated effects (§9) are computed when asked for. Units are linked to `.sift` unit IDs through the `.sift` files (by symbol, §7.2), not in the graph.
 
 Sources of edges in Phase 1:
 
 | Edge | Source | Confidence |
 |---|---|---|
-| `calls` | `CallSite.target` | `resolved` (TS checker) or `name-match` |
-| `calls` (via interface) | `CallSite.implementations` | `resolved`; edge to each implementation, marked as dispatch |
+| `calls` | `CallSite.target` or `CallSite.external` | `resolved` (TS checker) or `name-match` |
 | `implements` | `ExtractedUnit.implementsMember` | `resolved` |
 | `uses-type` | `ExtractedUnit.typeRefs` | `resolved` |
-| `handles-route`, `emits` | Edge rules (§9.1) | `rule` |
+| `handles-route`, `emits`, `listens` | Edge rules (§9.1) | `rule` |
 | `tests` | Phase 3 | — |
+
+A call through an interface is stored once, as a `calls` edge to the interface member. Dispatch to the implementations is worked out at query time from the `implements` edges, so adding a new implementation in another file never leaves an unchanged caller's edges out of date. Results reached this way say which member they were dispatched through.
 
 `language-server` and `inferred` are reserved for the generic adapter and for AI-proposed edges later.
 
 ### 10.2 Incremental Updates
 
-Edges are stored grouped by the file they originate from. When a file changes, its outgoing edges are dropped and rebuilt from the new `FileExtraction`. Incoming edges from unchanged files that point at symbols which no longer exist become **dangling** and are reported by `sift status`. Renamed units (§7.2) keep their `unitId`, so edges re-attach.
+Every read-only command first runs the freshness fast path (§5.1) and then refreshes the graph:
+
+1. A file whose hash differs from its graph entry (or that is new) is rebuilt. Files that no longer exist, or are no longer included, are dropped.
+2. Unchanged files with an edge into a changed or dropped file are rebuilt too, because the type checker may now resolve their calls differently (for example, the method they called was renamed). Their extraction cache is bypassed.
+3. Extractions come from the cache (§6.5) when the hash matches. The adapter's project, the slow part, is opened only when something must actually be re-extracted, and then once for all files.
+
+After a rename, a caller's call no longer resolves and shows up as a gap, which `sift status` (milestone 7) will report. An incremental refresh produces the same graph as a full rebuild in these cases, and a test checks this.
+
+Known limit: an unchanged file whose call was *unresolved* is not rebuilt when a new file makes that call resolvable. Deleting the cache, or any change to that file, fixes it.
 
 ### 10.3 Gaps
 
 The graph records what it could not resolve:
 
-- Call sites with `target: null` (dynamic calls, `any`-typed receivers).
-- Emit or route-registration sites whose arguments were `unknown`.
-- `emits` keys with no listener, and listeners with no emitter.
+- `unresolved-call`: call sites with neither a target nor a library (calls through function-typed variables, `any`-typed receivers).
+- `unknown-route`, `unknown-event`, `unknown-handler`: route or event registrations whose path, key, or handler was not a literal or a resolvable reference.
+- `emits` keys with no listener, and listeners with no emitter (`unmatchedEvents`).
 
-Graph queries print a short "may be incomplete" note when the result touches a unit with gaps, so a missing caller is never mistaken for proof that there is none.
+Queries say when a result may be incomplete, so a missing caller is never mistaken for proof that there is none:
+
+- `callers` and `impact` list unresolved call sites whose callee name matches the subject's last name part (`this.handlers.save(x)` for `Repo.save`) as possible callers.
+- `callees` lists the subject's own unresolved calls.
+- `impact` lists registrations it could not read inside the affected units.
 
 ### 10.4 Queries
 
 | Query | Result |
 |---|---|
-| `callers(unit, depth)` | Units that call it, transitively up to `depth`. |
-| `callees(unit, depth)` | Units it calls, including external nodes. |
-| `impact(units)` | Everything upstream of the given units: callers, then the routes and (Phase 3) tests reached. |
-| `impactOfDiff(gitRef)` | Maps changed line ranges in `git diff <ref>` to units, then runs `impact`. |
-| `flow(route)` | Units reachable downstream from a route handler, with effects at each step. |
-| `scc()` / `topoOrder()` | Used by the pipeline (§7.1). |
+| `find(name)` | Symbols matching `file#Symbol`, a qualified name, or its last part(s). Exact matches win; several matches are an error that lists them. |
+| `callers(unit, depth)` | Units that call it, transitively up to `depth`: direct calls, calls to an interface member it implements, emitters of events it listens to, and routes it handles. |
+| `callees(unit, depth)` | What it calls: units and declarations, the implementations of interface members it calls, library calls with their effects, and the listeners of events it emits. |
+| `effectsOf(unit, propagated)` | Direct effects, or with one level of propagation (§9). |
+| `impact(units)` | Everything upstream of the given units: callers, emitters, then the routes and (Phase 3) tests reached. At the same distance, the strongest path wins. |
+| `impactOfDiff(gitRef)` | Maps changed line ranges in `git diff --relative <ref>` (working tree against the ref) to units, then runs `impact`. Pure deletions mark the lines around them. |
+| `flow(route)` | Units reachable downstream from a route handler, with effects at each step. Milestone 6. |
+| `scc()` / `topoOrder()` | Used by the pipeline (§7.1). Milestone 6. |
 
-`impact` output groups results by kind (routes, units, tests) and shows each path's edge confidence, so a result that depends on a `name-match` edge is visibly weaker.
+`impact` output groups results by kind (routes, units, tests) and shows each path's weakest edge confidence, so a result that depends on a `name-match` edge is visibly weaker.
 
 ## 11. Secret Filtering
 
@@ -744,14 +790,14 @@ Before any prompt is sent:
 | `sift status` | Lists stale, new, deleted, unverified, and failed-validation units. | No |
 | `sift check` | Like `status`, but exits non-zero if anything is stale or missing. For CI and hooks. | No |
 | `sift show <symbol\|file>` | Prints a readable rendering of a unit (nested outline, warnings). | No |
-| `sift callers <symbol> [-d N]` | Units that call it, with edge confidence. | No |
-| `sift callees <symbol> [-d N]` | Units and external calls it makes, with effects. | No |
+| `sift callers <symbol> [-d N]` | Units and routes that call it, with edge confidence, as a tree. | No |
+| `sift callees <symbol> [-d N]` | Units and library calls it makes, with effects (propagated one level), and its unresolved calls. | No |
 | `sift impact <symbol…> \| --diff <ref>` | Units, routes, and tests that may be affected by changing the given units, or by the changes since a git ref. | No |
 | `sift eval` | Runs the evaluation harness (§13). `--matrix` runs the model matrix (§13.4). | Yes |
 | `sift qualify <provider>:<model>` | Runs the qualification subset and assigns the model a tier (§4.4). | Yes |
 | `sift models` | Shows the active routing: task → tier → model, overrides, and qualified local models. | No |
 
-All read-only commands run the freshness fast path (§5.1) first and refresh the graph if needed, so results are never stale. `--json` is available on every query command for scripts and, later, the MCP server.
+All read-only commands run the freshness fast path (§5.1) first and refresh the graph if needed (§10.2), so results are never stale. `--json` is available on every query command for scripts and, later, the MCP server; `--full-hash` is available on every command that refreshes the graph. Symbols are given as `file#Symbol`, `Class.method`, or a unique last part such as `transferFunds`.
 
 `sift.config.yaml`:
 
@@ -839,7 +885,7 @@ Rules:
 
 - **Adapter:** snapshot tests of `FileExtraction` for small source samples (each construct, JS vs TS, inferred types, interface implementations, external calls).
 - **Core:** unit tests for hashing, freshness fingerprints, identity matching, coverage validation, rule matching, serialization round-trips (byte-identical rewrite when nothing changed), atomic writes, secret redaction.
-- **Graph:** edges and confidence over the fixture (interface dispatch, Express routes, events); incremental rebuild after editing one file equals a full rebuild; dangling edges and gaps reported; `impact --diff` on scripted git changes.
+- **Graph:** edges and confidence over the fixture (interface dispatch, Express routes, events); incremental rebuild after editing one file equals a full rebuild; gaps reported; `impact --diff` on scripted git changes.
 - **Pipeline:** end-to-end with `FakeProvider` over the fixture: generate, edit code, regenerate, assert only expected units changed and IDs were preserved; simulate a file move and a rename.
 - **Provider:** contract test that runs against the real `claude -p` only when an environment flag is set.
 

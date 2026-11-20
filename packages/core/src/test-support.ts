@@ -1,3 +1,4 @@
+import type { CallArg, CallSite } from "./adapter.js";
 import type { SiftFile, SiftUnit } from "./schema.js";
 
 /** A realistic `.sift` file (design §6.1) for tests. Not exported from the package. */
@@ -75,4 +76,16 @@ export function liteUnit(): SiftUnit {
     warnings: [],
     tests: [],
   };
+}
+
+const RANGE = { start: { line: 1, col: 1 }, end: { line: 1, col: 2 } };
+
+/** A call into a library, as an adapter would report it. */
+export function ext(module: string, name: string, args: CallArg[] = []): CallSite {
+  return { expression: `${name}()`, target: null, confidence: "resolved", implementations: [], external: { module, name }, awaited: false, args, range: RANGE };
+}
+
+/** A resolved call into a project symbol. */
+export function internal(file: string, symbol: string, args: CallArg[] = []): CallSite {
+  return { ...ext("x", "y", args), expression: `${symbol}()`, external: null, target: { file, symbol } };
 }

@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { FileExtraction } from "./adapter.js";
+import { GRAPH_VERSION, type GraphData } from "./graph.js";
 import { SIFT_DIR } from "./config.js";
 import { writeFileAtomic } from "./fs.js";
 
@@ -59,6 +60,19 @@ export class SiftCache {
     const files = Object.fromEntries([...fingerprints.entries()].sort(([a], [b]) => a.localeCompare(b)));
     const data: FingerprintFile = { version: CACHE_VERSION, files };
     await writeFileAtomic(join(this.dir, "fingerprints.json"), `${JSON.stringify(data, null, 1)}\n`);
+  }
+
+  /** The stored code graph, or null if missing, unreadable, or from another version. */
+  async getGraph(): Promise<GraphData | null> {
+    const data = await this.readJson<GraphData & { cache?: number }>(join(this.dir, "graph.json"));
+    if (!data || data.cache !== CACHE_VERSION || data.version !== GRAPH_VERSION || typeof data.files !== "object") return null;
+    const { cache: _cache, ...graph } = data;
+    return graph;
+  }
+
+  async putGraph(graph: GraphData): Promise<void> {
+    const files = Object.fromEntries(Object.entries(graph.files).sort(([a], [b]) => a.localeCompare(b)));
+    await writeFileAtomic(join(this.dir, "graph.json"), JSON.stringify({ cache: CACHE_VERSION, ...graph, files }));
   }
 
   async clear(): Promise<void> {

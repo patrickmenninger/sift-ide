@@ -1,0 +1,8 @@
+# Node.js child processes.
+pack: node-child-process
+version: 1
+rules:
+  - match:
+      module: "{child_process,node:child_process}"
+      member: "{exec,execSync,execFile,execFileSync,spawn,spawnSync,fork}"
+    effect: process.exec

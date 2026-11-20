@@ -1,7 +1,22 @@
-import { extname, relative, resolve } from "node:path";
+import { createRequire } from "node:module";
+import { dirname, extname, join, relative, resolve } from "node:path";
 import { Command, CommanderError } from "commander";
-import { initProject, listSiftFiles, loadProject, readSiftFile, SiftError, siftPathFor, type LanguageAdapter } from "@sift/core";
+import {
+  gitDiff,
+  initProject,
+  listSiftFiles,
+  loadProject,
+  loadRulePacks,
+  readSiftFile,
+  refreshGraph,
+  RuleSet,
+  SiftError,
+  siftPathFor,
+  type CodeGraph,
+  type LanguageAdapter,
+} from "@sift/core";
 import { typescriptAdapter } from "@sift/adapter-typescript";
+import { renderCallees, renderCallers, renderImpact } from "./graph-render.js";
 import { renderSift, renderStructure } from "./render.js";
 
 function toProjectPath(root: string, abs: string): string {
@@ -54,9 +69,6 @@ const PLANNED: { name: string; args?: string; summary: string; availableIn: stri
   { name: "generate", args: "[paths...]", summary: "Write or update .sift files for source files", availableIn: "milestone 6" },
   { name: "status", summary: "List stale, new, deleted, and unverified units", availableIn: "milestone 7" },
   { name: "check", summary: "Exit non-zero if any .sift file is stale or missing (for CI and hooks)", availableIn: "milestone 7" },
-  { name: "callers", args: "<symbol>", summary: "List units that call a symbol", availableIn: "milestone 4" },
-  { name: "callees", args: "<symbol>", summary: "List units and external calls a symbol makes", availableIn: "milestone 4" },
-  { name: "impact", args: "[symbols...]", summary: "List units, routes, and tests a change may affect", availableIn: "milestone 4" },
   { name: "eval", summary: "Run the evaluation harness", availableIn: "milestone 8" },
   { name: "models", summary: "Show task, tier, and model routing", availableIn: "milestone 6" },
   { name: "qualify", args: "<provider:model>", summary: "Test a model and assign it a tier", availableIn: "the bring-your-own-key providers" },
@@ -146,6 +158,73 @@ export function buildProgram(io: CliIO = processIO): Command {
       }
     });
 
+  const graphOptions = (cmd: Command) =>
+    cmd
+      .option("--json", "print raw JSON")
+      .option("--full-hash", "hash every file instead of trusting size and modification time (also SIFT_FULL_HASH=1)");
+
+  graphOptions(
+    program
+      .command("callers <symbol>")
+      .description("List units that call a symbol (file#Symbol, Class.method, or method), with edge confidence")
+      .option("-d, --depth <n>", "follow callers this many levels up", "1"),
+  ).action(async (query: string, opts: GraphOpts & { depth: string }, cmd: Command) => {
+    const graph = await openGraph(cmd, opts);
+    const id = resolveSymbol(graph, query);
+    const hits = graph.callers(id, depthOf(opts.depth));
+    const gaps = graph.possibleCallers(id);
+    io.out(opts.json ? JSON.stringify({ subject: id, callers: hits, possibleCallers: gaps }, null, 2) : renderCallers(graph, id, hits, gaps));
+  });
+
+  graphOptions(
+    program
+      .command("callees <symbol>")
+      .description("List the units and library calls a symbol makes, with their effects")
+      .option("-d, --depth <n>", "follow calls this many levels down", "1"),
+  ).action(async (query: string, opts: GraphOpts & { depth: string }, cmd: Command) => {
+    const graph = await openGraph(cmd, opts);
+    const id = resolveSymbol(graph, query);
+    const hits = graph.callees(id, depthOf(opts.depth));
+    const gaps = graph.gapsIn(id);
+    io.out(opts.json ? JSON.stringify({ subject: id, effects: graph.effectsOf(id, { propagated: true }), callees: hits, unresolved: gaps }, null, 2) : renderCallees(graph, id, hits, gaps));
+  });
+
+  graphOptions(
+    program
+      .command("impact [symbols...]")
+      .description("List the units, routes, and tests that may be affected by changing symbols, or by the changes since a git ref")
+      .option("--diff <ref>", "use the units changed since <ref> (git diff), e.g. HEAD or main"),
+  ).action(async (queries: string[], opts: GraphOpts & { diff?: string }, cmd: Command) => {
+    if (queries.length === 0 && opts.diff === undefined) {
+      throw new SiftError("SOURCE_NOT_FOUND", "Name at least one symbol, or use --diff <ref>.");
+    }
+    const graph = await openGraph(cmd, opts);
+    const subjects = queries.map((q) => resolveSymbol(graph, q));
+    const notes: string[] = [];
+    if (opts.diff !== undefined) {
+      const diff = await gitDiff(graph.root, opts.diff);
+      for (const [file, ranges] of [...diff.changed].sort(([a], [b]) => a.localeCompare(b))) {
+        if (!graph.files.includes(file)) continue;
+        const units = graph.unitsAt(file, ranges);
+        if (units.length === 0) notes.push(`${file}: changes are outside any unit (imports, types, or comments)`);
+        for (const u of units) if (!subjects.includes(u)) subjects.push(u);
+      }
+      for (const file of diff.deleted) if (ADAPTERS.some((a) => a.extensions.includes(extname(file).toLowerCase()))) notes.push(`${file}: deleted; its callers now show as unresolved calls`);
+      if (subjects.length === 0) {
+        io.out(opts.json ? JSON.stringify({ subjects, notes }, null, 2) : [`No units changed since ${opts.diff}.`, ...notes.map((n) => `  ${n}`)].join("\n"));
+        return;
+      }
+    }
+    const result = graph.impact(subjects);
+    if (opts.json) {
+      io.out(JSON.stringify({ subjects, ...result, notes }, null, 2));
+      return;
+    }
+    const lines = [renderImpact(graph, subjects, result)];
+    if (opts.diff !== undefined) lines.unshift(`Changed since ${opts.diff}: ${subjects.length} unit${subjects.length === 1 ? "" : "s"}`, ...subjects.map((s) => `  ${s}`), ...notes.map((n) => `  ${n}`), "");
+    io.out(lines.join("\n"));
+  });
+
   for (const planned of PLANNED) {
     const cmd = program.command(planned.args ? `${planned.name} ${planned.args}` : planned.name);
     cmd.description(`${planned.summary} (not available yet)`).allowUnknownOption();
@@ -155,6 +234,51 @@ export function buildProgram(io: CliIO = processIO): Command {
   }
 
   return program;
+}
+
+interface GraphOpts {
+  json?: boolean;
+  fullHash?: boolean;
+}
+
+/** The built-in rule packs shipped in @sift/rules. */
+function builtinRulesDir(): string {
+  return join(dirname(createRequire(import.meta.url).resolve("@sift/rules/package.json")), "packs");
+}
+
+/** Load the project and its rule packs, and bring the code graph up to date (design §12: queries never see stale data). */
+async function openGraph(cmd: Command, opts: GraphOpts): Promise<CodeGraph & { root: string }> {
+  const project = await loadProject(cwdOf(cmd));
+  const loaded = await loadRulePacks(project.root, { builtinDir: builtinRulesDir() });
+  const { graph } = await refreshGraph({
+    root: project.root,
+    config: project.config,
+    adapters: ADAPTERS,
+    rules: new RuleSet(loaded.packs),
+    fullHash: opts.fullHash === true || process.env.SIFT_FULL_HASH === "1",
+  });
+  return Object.assign(graph, { root: project.root });
+}
+
+function resolveSymbol(graph: CodeGraph, query: string): string {
+  const matches = graph.find(query);
+  if (matches.length === 1) return matches[0]!;
+  if (matches.length > 1) {
+    throw new SiftError("SOURCE_NOT_FOUND", `"${query}" matches ${matches.length} symbols; use one of these names:`, matches);
+  }
+  const lower = query.toLowerCase().split("#").pop()!;
+  const similar = graph.units().map((u) => u.id).filter((id) => id.toLowerCase().includes(lower)).sort().slice(0, 10);
+  throw new SiftError(
+    "SOURCE_NOT_FOUND",
+    `No unit or symbol named "${query}" in the files Sift reads (sift.config.yaml include/exclude).`,
+    similar.map((id) => `similar: ${id}`),
+  );
+}
+
+function depthOf(value: string): number {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1) throw new SiftError("SOURCE_NOT_FOUND", `--depth must be a whole number of at least 1, not "${value}".`);
+  return n;
 }
 
 function cwdOf(cmd: Command): string {

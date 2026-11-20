@@ -219,3 +219,14 @@ describe("findImplementations", () => {
     expect(project.findImplementations({ file: "src/accounts/account-repository.ts", symbol: "AccountRepository.missing" })).toEqual([]);
   });
 });
+
+describe("hashFile", () => {
+  it("matches the extraction's file hash without opening a project", async () => {
+    const { readdir, readFile } = await import("node:fs/promises");
+    const files = (await readdir(`${FIXTURE}/src`, { recursive: true })).map((f) => `src/${f.replaceAll("\\", "/")}`).filter((f) => /\.(ts|tsx|js)$/.test(f));
+    expect(files.length).toBeGreaterThan(10);
+    for (const path of files) {
+      expect(typescriptAdapter.hashFile(path, await readFile(`${FIXTURE}/${path}`, "utf8")), path).toBe(file(path).fileHash);
+    }
+  });
+});

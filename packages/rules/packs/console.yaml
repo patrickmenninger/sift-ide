@@ -1,0 +1,6 @@
+# Console output.
+pack: console
+version: 1
+rules:
+  - match: { module: global, member: "Console.{log,info,warn,error,debug,trace}" }
+    effect: log

@@ -12,6 +12,7 @@
   "dependencies": {
     "@sift/adapter-typescript": "0.0.0",
     "@sift/core": "0.0.0",
+    "@sift/rules": "0.0.0",
     "commander": "^15.1.0"
   }
 }

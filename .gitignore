@@ -3,5 +3,5 @@ dist/
 *.tsbuildinfo
 coverage/
 eval/results/
-.sift/.cache/
-.sift/models.local.yaml
+**/.sift/.cache/
+**/.sift/models.local.yaml

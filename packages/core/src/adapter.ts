@@ -8,6 +8,11 @@ export interface LanguageAdapter {
   id: string;
   /** e.g. [".ts", ".tsx", ".js"] */
   extensions: string[];
+  /**
+   * The file-level normalized hash (design §5), equal to `FileExtraction.fileHash` for the same text.
+   * Must be cheap: it runs without opening a project, for the freshness fast path (§5.1).
+   */
+  hashFile(path: string, text: string): string;
   /** Load the project (tsconfig/jsconfig or defaults). Called once per run. */
   openProject(root: string, files: string[], options?: AdapterOptions): Promise<AdapterProject>;
 }

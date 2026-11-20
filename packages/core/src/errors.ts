@@ -5,6 +5,8 @@ export type SiftErrorCode =
   | "SIFT_TOO_NEW"
   | "SOURCE_NOT_FOUND"
   | "UNSUPPORTED_FILE"
+  | "RULES_INVALID"
+  | "GIT_FAILED"
   | "NOT_IMPLEMENTED";
 
 /** An expected failure with a message fit to show the user as-is. */

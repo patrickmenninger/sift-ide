@@ -1,0 +1,18 @@
+# Prisma Client. Members are the declarations' qualified names, so `prisma.account.update(...)`
+# matches "Prisma.AccountDelegate.update" whatever the variable is called.
+# The generated client lives in "@prisma/client" or, in older setups, "node_modules/.prisma".
+pack: prisma
+version: 1
+appliesWhen:
+  dependency: "@prisma/client"
+rules:
+  - match: { module: "{@prisma/client,.prisma}", member: "Prisma.*Delegate.{findUnique,findUniqueOrThrow,findFirst,findFirstOrThrow,findMany,count,aggregate,groupBy}" }
+    effect: db.read
+  - match: { module: "{@prisma/client,.prisma}", member: "Prisma.*Delegate.{create,createMany,createManyAndReturn,update,updateMany,updateManyAndReturn,upsert,delete,deleteMany}" }
+    effect: db.write
+  - match: { module: "{@prisma/client,.prisma}", member: "PrismaClient.$transaction" }
+    effect: db.transaction
+  - match: { module: "{@prisma/client,.prisma}", member: "PrismaClient.{$queryRaw,$queryRawUnsafe}" }
+    effect: db.read
+  - match: { module: "{@prisma/client,.prisma}", member: "PrismaClient.{$executeRaw,$executeRawUnsafe}" }
+    effect: db.write

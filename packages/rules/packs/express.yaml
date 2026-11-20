@@ -1,0 +1,10 @@
+# Express route registration: router.get("/path", handler) and app.post("/path", handler).
+pack: express
+version: 1
+appliesWhen:
+  dependency: express
+edges:
+  - match: { module: express, member: "{Router,Application}.{get,post,put,patch,delete,all}" }
+    edge: handles-route
+    from: { arg: -1 }       # handler = last argument: a function reference or an inline callback
+    route: { method: member, path: { arg: 0 } }

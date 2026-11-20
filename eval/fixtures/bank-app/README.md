@@ -3,6 +3,7 @@
 A small TypeScript banking service written to test Sift. It is never run; it only needs to type-check.
 
 - **Third-party libraries are stubbed** in `types/` (`@prisma/client`, `express`, a JSX namespace) so the fixture needs no install or code generation. Stubs mirror the real libraries' shapes closely enough for call resolution and rule packs. Node built-ins come from the repository's `@types/node`.
+- **`.sift/rules/events.yaml`** is a project rule pack that teaches Sift the app's event bus (`emit`/`on`), so the graph links `transfer.completed` to its listener.
 - **`tests/`** holds Vitest tests for Phase 3. They are not part of `sift.config.yaml`'s `include`.
 
 ## Planted problems

@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import ts from "typescript";
 import { SiftError, type AdapterOptions, type AdapterProject, type LanguageAdapter } from "@sift/core";
+import { hashFileText } from "./hash-file.js";
 import { TsProject } from "./project.js";
 
 export { TsProject } from "./project.js";
@@ -18,6 +19,8 @@ const DEFAULT_OPTIONS: ts.CompilerOptions = {
 export const typescriptAdapter: LanguageAdapter = {
   id: "typescript",
   extensions: [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"],
+
+  hashFile: hashFileText,
 
   async openProject(root: string, files: string[], options?: AdapterOptions): Promise<AdapterProject> {
     const absRoot = resolve(root);

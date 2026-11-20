@@ -1,0 +1,6 @@
+# The global fetch API (browsers, Node.js 18+, Deno, Bun).
+pack: fetch
+version: 1
+rules:
+  - match: { module: global, member: fetch }
+    effect: net.request

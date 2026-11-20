@@ -1,0 +1,12 @@
+# Node.js file system: "fs" and "fs/promises" (also reached as "node:fs" and fs.promises).
+pack: node-fs
+version: 1
+rules:
+  - match:
+      module: "{fs,fs/promises,node:fs,node:fs/promises}"
+      member: "{,FileHandle.}{readFile,readFileSync,readdir,readdirSync,read,readSync,readv,stat,statSync,lstat,lstatSync,fstat,access,accessSync,exists,existsSync,createReadStream,opendir,opendirSync,readlink,readlinkSync,realpath,realpathSync,watch,watchFile,glob,globSync}"
+    effect: fs.read
+  - match:
+      module: "{fs,fs/promises,node:fs,node:fs/promises}"
+      member: "{,FileHandle.}{writeFile,writeFileSync,write,writeSync,writev,appendFile,appendFileSync,createWriteStream,mkdir,mkdirSync,mkdtemp,mkdtempSync,rm,rmSync,rmdir,rmdirSync,unlink,unlinkSync,rename,renameSync,copyFile,copyFileSync,cp,cpSync,truncate,truncateSync,chmod,chmodSync,chown,chownSync,symlink,symlinkSync,link,linkSync,utimes,utimesSync}"
+    effect: fs.write

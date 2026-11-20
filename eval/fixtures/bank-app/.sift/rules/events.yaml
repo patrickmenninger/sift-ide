@@ -1,0 +1,11 @@
+# The app's own event bus: bus.emit("name", ...) and bus.on("name", handler).
+pack: bank-app-events
+version: 1
+edges:
+  - match: { symbol: "EventBus.emit" }
+    edge: emits
+    key: { arg: 0 }
+  - match: { symbol: "EventBus.on" }
+    edge: listens
+    key: { arg: 0 }
+    from: { arg: 1 }
