@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { CallSite, ExtractedUnit, StructureNode } from "./adapter.js";
 import { annotatedSource, renderDescribeInput } from "./describe-input.js";
-import { contextHashOf, deriveSiftUnit, validateDescribeResponse, type DescribeResponse } from "./describe-output.js";
+import { contextHashOf, deriveSiftUnit, foldDestructured, validateDescribeResponse, type DescribeResponse } from "./describe-output.js";
 import { loadPrompt, parsePromptFile } from "./prompts.js";
 import { ext, internal } from "./test-support.js";
 import { validateSiftFile } from "./validate.js";
@@ -133,6 +133,17 @@ describe("validateDescribeResponse", () => {
   it("counts a parent's coverage for its children", () => {
     const flat = { ...RESPONSE, steps: [{ kind: null, text: "All of it.", covers: ["0", "1", "2"], steps: [] }] };
     expect(validateDescribeResponse(flat, UNIT, false).uncovered).toEqual([]);
+  });
+
+  it("folds inputs that name a destructured parameter's elements into that parameter", () => {
+    const props = { ...UNIT, inputs: [{ name: "{ account, highlight = false }", type: "Props", typeInferred: false }] };
+    const { steps: _steps, ...lite } = RESPONSE;
+    const split = { ...lite, warnings: [], inputs: [{ name: "account", meaning: "The account." }, { name: "highlight", meaning: "Whether to warn." }] };
+    const result = validateDescribeResponse(split, props, true);
+    expect(result.problems).toEqual([]);
+    expect(result.response!.inputs).toEqual([{ name: "{ account, highlight = false }", meaning: "`account`: The account. `highlight`: Whether to warn." }]);
+    expect(foldDestructured(["{ a, b }", "c"], [{ name: "{a,b}", meaning: "x" }, { name: "c", meaning: "y" }])).toEqual([{ name: "{a,b}", meaning: "x" }, { name: "c", meaning: "y" }]);
+    expect(foldDestructured(["{ a, b }"], [{ name: "b", meaning: "x" }, { name: "a", meaning: "y" }])).toHaveLength(2);
   });
 
   it("rejects malformed shapes", () => {

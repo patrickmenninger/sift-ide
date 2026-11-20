@@ -615,7 +615,7 @@ Run after every AI response, before anything is written:
 | **Coverage** | Every structure node is covered by some step (a parent's coverage includes its children). | Retry once; then write with `status: stale` and report `uncovered: [...]`. |
 | Kind consistency | A step of kind `if`/`loop`/`try` covers a node of that kind. | Retry once. |
 | Effects mentioned | Each node with an effect (db.write, net, fs.write, throws) is covered by a step. | Same as coverage. |
-| Inputs complete | `inputs` names match the signature exactly (whitespace ignored, for destructuring patterns such as `{ a, b }`). | Retry once. |
+| Inputs complete | `inputs` names match the signature exactly (whitespace ignored, for destructuring patterns such as `{ a, b }`). A destructured parameter described as one input per element, in order, is folded into that parameter instead of retried. | Retry once. |
 | Returns | `returns` is present when the unit returns something other than `void`. | Retry once. |
 | Warnings | Warning kinds are kebab-case and their `covers` keys exist. | Retry once. |
 

@@ -95,6 +95,7 @@ export function validateDescribeResponse(json: unknown, unit: ExtractedUnit, lit
   const response = parseShape(json, lite, problems);
   if (!response) return { response: null, problems, uncovered: [] };
 
+  response.inputs = foldDestructured(unit.inputs.map((i) => i.name), response.inputs);
   const expected = unit.inputs.map((i) => normalizeName(i.name));
   const got = response.inputs.map((i) => normalizeName(i.name));
   if (expected.join(",") !== got.join(",")) {
@@ -132,6 +133,45 @@ export function validateDescribeResponse(json: unknown, unit: ExtractedUnit, lit
   const uncovered = [...missing].filter((k) => ![...missing].some((m) => m !== k && k.startsWith(`${m}.`)));
   if (uncovered.length > 0) problems.push(`These structure keys are not covered by any step: ${uncovered.join(", ")}.`);
   return { response, problems, uncovered };
+}
+
+/**
+ * Models often describe a destructured parameter (`{ account, highlight }`, typical for React props)
+ * as one input per name. That is a fair reading, so instead of spending a retry on it, consecutive
+ * inputs that name exactly the pattern's elements, in order, are folded into the one parameter.
+ */
+export function foldDestructured(params: string[], inputs: { name: string; meaning: string }[]): { name: string; meaning: string }[] {
+  const out: { name: string; meaning: string }[] = [];
+  let at = 0;
+  for (const param of params) {
+    const elements = patternElements(param);
+    const next = inputs.slice(at, at + (elements?.length ?? 0));
+    if (elements && elements.length > 1 && next.length === elements.length && next.every((i, k) => normalizeName(i.name) === elements[k])) {
+      out.push({ name: param, meaning: next.map((i, k) => `\`${elements[k]}\`: ${i.meaning}`).join(" ") });
+      at += elements.length;
+    } else if (at < inputs.length) {
+      out.push(inputs[at++]!);
+    }
+  }
+  return [...out, ...inputs.slice(at)];
+}
+
+/** The names bound by a simple object or array pattern (`{ a, b: c, d = 1, ...e }` → a, b, d, e), or null. */
+function patternElements(param: string): string[] | null {
+  const m = /^\s*[{[]([\s\S]*)[}\]]\s*$/.exec(param);
+  if (!m) return null;
+  const parts: string[] = [];
+  let depth = 0;
+  let cur = "";
+  for (const ch of m[1]!) {
+    if ("{[(".includes(ch)) depth++;
+    if ("}])".includes(ch)) depth--;
+    if (ch === "," && depth === 0) (parts.push(cur), (cur = ""));
+    else cur += ch;
+  }
+  parts.push(cur);
+  const names = parts.map((p) => p.trim()).filter((p) => p !== "").map((p) => /^(?:\.\.\.)?\s*([\w$]+)/.exec(p)?.[1] ?? "");
+  return names.every((n) => n !== "") ? names : null;
 }
 
 /** Parameter names compare without whitespace differences (destructuring patterns such as `{ a, b }`). */
