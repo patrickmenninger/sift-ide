@@ -1,6 +1,8 @@
 export type SiftErrorCode =
   | "CONFIG_NOT_FOUND"
   | "CONFIG_INVALID"
+  | "SIFT_INVALID"
+  | "SIFT_TOO_NEW"
   | "SOURCE_NOT_FOUND"
   | "UNSUPPORTED_FILE"
   | "NOT_IMPLEMENTED";

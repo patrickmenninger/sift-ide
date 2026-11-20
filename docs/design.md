@@ -296,7 +296,11 @@ Qualification thresholds (initial; tuned once real results exist): coverage pass
 Each unit records what produced it:
 
 ```yaml
-    generatedBy: { provider: claude-code, model: claude-opus-5-5, prompt: describe@3, belowTier: false }
+    generatedBy:
+      provider: claude-code
+      model: claude-opus-5-5
+      prompt: describe@3
+      belowTier: false
 ```
 
 `generatedBy` changes only when the unit is regenerated, so it adds no churn. `sift status` can list units produced below their recommended tier, so they can be regenerated with a stronger model later.
@@ -325,7 +329,7 @@ Hashing every file on every command is too slow for `status`, `check`, and graph
 
 ### 6.1 Example
 
-`.sift/accounts/account-service.ts.sift`:
+`.sift/src/accounts/account-service.ts.sift` (the full source path is mirrored under `.sift/`; `.sift/<path>.sift` ↔ `<path>`):
 
 ```yaml
 sift: 0
@@ -465,10 +469,17 @@ units:
 
 ### 6.3 Serialization Rules
 
-- Key order is fixed (the order in the example).
-- Prose (`summary`, `meaning`, `text`) uses `>` block scalars when longer than one line or containing YAML-significant characters; plain scalars otherwise. Line width 80.
-- Rewrites go through the `yaml` Document API, editing only changed nodes, so untouched content stays byte-identical.
-- Writes are atomic: write to a temp file in the same directory, then rename.
+Implemented in `core/sift-yaml.ts`; the full example above is a snapshot test.
+
+- **Fixed key order** (the order in the example), empty lists and absent optional fields omitted. The same data always serializes to the same bytes, and re-serializing a parsed file reproduces it exactly.
+- **Prose** (`summary`, `meaning`, `text`) longer than 60 characters, or containing a line break, is a folded block scalar (`>-`); shorter prose is a plain scalar, quoted only if YAML requires it. Line width 80.
+- **Lists of plain values** (`effects`, `covers`, `calls`, warning `steps`, `tests`) are written on one line: `effects: [db.read, db.write]`. Everything else, including `generatedBy`, is block style.
+- **Rewrites keep unchanged units byte-identical.** The existing file is split into one text chunk per unit (a chunk includes comment or blank lines directly above its `- id:` line). A unit whose content equals the new content keeps its chunk exactly, even if it was hand-formatted or commented; changed and new units are serialized fresh; the header is regenerated. The spliced result is parsed and compared with the intended content, and if it differs (for example, a hand-edited file used a different indentation), the whole file is written fresh instead.
+- **No-op writes are skipped:** if the result equals the file on disk, nothing is written, so file timestamps don't change.
+- **Writes are atomic:** write to a temp file in the same directory, then rename.
+- **Strict validation on read** (`core/validate.ts`): unknown fields, bad ID formats, unknown effects, duplicate IDs, warnings referring to missing steps, and steps on lite units are all reported with their location (e.g. `units[0].steps[1].id: duplicate step id s_q2w6`). A file with a higher `sift` version than this build understands is refused (`SIFT_TOO_NEW`) rather than misread. A file that can't be parsed is never merged into; it is replaced on the next write.
+
+IDs use the base32 alphabet `a–z2–7`.
 
 ### 6.4 Lite Units
 
@@ -478,7 +489,7 @@ The adapter marks a unit `isSmall` when it has no control flow, no callbacks, no
 
 `.sift/.cache/` (git-ignored) stores:
 
-- `files/…` — per source file, the last `FileExtraction` (ranges, structure, call sites), keyed by `fileHash`.
+- `files/<source path>.json` — per source file, the last `FileExtraction` (ranges, structure, call sites), used only when its `fileHash` and adapter match.
 - `fingerprints.json` — size, mtime, and hash per source file (§5.1).
 - `graph.json` — the code graph (§10).
 
@@ -836,7 +847,7 @@ Rules:
 
 1. **Skeleton** — monorepo, packages, CLI wiring, `sift init`, config loading.
 2. **Extraction** — TS adapter: units, structure tree, keys, types, hashes, call resolution, implementations, external calls. `sift show --structure` to inspect.
-3. **Schema and storage** — schema types, YAML serializer, atomic writes, cache.
+3. **Schema and storage** — schema types and strict validation, YAML serializer with byte-stable rewrites, `.sift` store, IDs, extraction and fingerprint cache, `sift show` for `.sift` files.
 4. **Rule packs and graph** — rule loader and matcher, built-in packs, effect propagation, edge rules, code graph, freshness fast path, `callers` / `callees` / `impact`.
 5. **Fixture** — bank-app and expectations (built alongside M2, since it is also the adapter's test input).
 6. **Generation** — provider interface, Claude Code provider, describe prompt, validation and retry, `sift generate` for new units.

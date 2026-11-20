@@ -1,8 +1,26 @@
-import { extname, resolve } from "node:path";
+import { extname, relative, resolve } from "node:path";
 import { Command, CommanderError } from "commander";
-import { initProject, loadProject, SiftError, type LanguageAdapter } from "@sift/core";
+import { initProject, listSiftFiles, loadProject, readSiftFile, SiftError, siftPathFor, type LanguageAdapter } from "@sift/core";
 import { typescriptAdapter } from "@sift/adapter-typescript";
-import { renderStructure } from "./render.js";
+import { renderSift, renderStructure } from "./render.js";
+
+function toProjectPath(root: string, abs: string): string {
+  return relative(root, abs).replace(/\\/g, "/");
+}
+
+/** Unit ID → "file#symbol" across every .sift file, so calls render as names. Unreadable files are skipped. */
+async function unitNameIndex(root: string): Promise<Map<string, string>> {
+  const names = new Map<string, string>();
+  for (const source of await listSiftFiles(root)) {
+    try {
+      const stored = await readSiftFile(root, source);
+      for (const u of stored?.file.units ?? []) names.set(u.id, `${source}#${u.symbol}`);
+    } catch {
+      // An invalid file elsewhere shouldn't stop showing this one; its calls render as unknown.
+    }
+  }
+  return names;
+}
 
 const ADAPTERS: LanguageAdapter[] = [typescriptAdapter];
 
@@ -73,19 +91,41 @@ export function buildProgram(io: CliIO = processIO): Command {
 
   program
     .command("show <target>")
-    .description("Print a file or unit (file#Symbol). Use --structure to see what the language adapter extracted.")
+    .description("Print the description of a file or unit (file#Symbol). --structure shows what the language adapter extracted instead.")
     .option("--structure", "show the adapter's extraction: units, statement tree, calls, types")
     .option("--json", "print raw JSON instead of the readable outline")
     .action(async (target: string, opts: { structure?: boolean; json?: boolean }, cmd: Command) => {
-      if (!opts.structure) {
-        throw new SiftError("NOT_IMPLEMENTED", '"sift show" without --structure needs .sift files, which arrive with milestones 3 and 6.');
-      }
       const cwd = cwdOf(cmd);
       const project = await loadProject(cwd);
       const hash = target.indexOf("#");
       const filePart = hash >= 0 ? target.slice(0, hash) : target;
       const symbol = hash >= 0 ? target.slice(hash + 1) : undefined;
       const abs = resolve(cwd, filePart);
+
+      if (!opts.structure) {
+        const sourcePath = toProjectPath(project.root, abs);
+        const stored = await readSiftFile(project.root, sourcePath);
+        if (!stored) {
+          throw new SiftError(
+            "SOURCE_NOT_FOUND",
+            `${sourcePath} has no description yet (${siftPathFor(sourcePath)} does not exist). "sift generate" creates it (milestone 6); "sift show --structure" works now.`,
+          );
+        }
+        const units = symbol === undefined ? stored.file.units : stored.file.units.filter((u) => u.symbol === symbol);
+        if (symbol !== undefined && units.length === 0) {
+          throw new SiftError(
+            "SOURCE_NOT_FOUND",
+            `No unit named "${symbol}" in ${siftPathFor(sourcePath)}.`,
+            stored.file.units.map((u) => `available: ${u.symbol}`),
+          );
+        }
+        if (opts.json) {
+          io.out(JSON.stringify(symbol === undefined ? stored.file : { ...stored.file, units }, null, 2));
+          return;
+        }
+        io.out(renderSift(stored.file, units, await unitNameIndex(project.root)));
+        return;
+      }
 
       const adapterProject = await adapterFor(abs).openProject(project.root, [abs], {
         liteMaxStatements: project.config.lite.maxStatements,

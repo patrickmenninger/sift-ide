@@ -224,7 +224,7 @@ A `.sift` file stores the natural-language logic and the metadata that connects 
 
 ### 4.2 Layout
 
-There is one `.sift` file per source file, mirroring the source tree under a `.sift/` directory at the project root:
+There is one `.sift` file per source file. The full project-relative source path is mirrored under a `.sift/` directory at the project root, and the full file name is kept, so files in different top-level folders (`src/`, `lib/`) or with different extensions (`a.ts`, `a.js`) never collide:
 
 ```text
 my-app/
@@ -236,13 +236,15 @@ my-app/
 │       └── authenticate.ts
 │
 ├── .sift/
-│   ├── accounts/
-│   │   ├── transfer.ts.sift
-│   │   └── accounts.ts.sift
-│   ├── users/
-│   │   └── authenticate.ts.sift
-│   ├── rules/            # project framework rule packs (committed)
-│   └── .cache/           # derived data (not committed)
+│   ├── src/
+│   │   ├── accounts/
+│   │   │   ├── transfer.ts.sift
+│   │   │   └── accounts.ts.sift
+│   │   └── users/
+│   │       └── authenticate.ts.sift
+│   ├── rules/                # project framework rule packs (committed)
+│   ├── models.local.yaml     # per-machine model settings (not committed)
+│   └── .cache/               # derived data (not committed)
 │
 └── tests/
 ```
@@ -253,10 +255,10 @@ my-app/
 
 Serialization rules:
 
-- Prose is always written as YAML block scalars.
-- Keys are always written in a fixed order.
-- Files are rewritten with a formatting-preserving YAML library so that unchanged content stays byte-identical.
-- Every file declares a schema version.
+- Long prose is written as YAML folded block scalars, so it needs no quoting or escaping.
+- Keys are always written in a fixed order, and the same data always produces the same bytes.
+- When a file is rewritten, units whose content did not change keep their exact existing text, including any comments or formatting around them, so diffs show only real changes. A file whose content did not change is not rewritten at all.
+- Every file declares a schema version. Files are validated strictly when read: every problem is reported with its location, and a file written by a newer version of Sift is refused with a clear message rather than misread.
 
 ### 4.4 Deterministic and AI-Generated Content
 
