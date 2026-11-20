@@ -1,4 +1,4 @@
-import { cp, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rename, symlink, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -26,23 +26,34 @@ async function sift(provider: FakeProvider, ...args: string[]) {
 
 const unitOf = (req: CompletionRequest) => /^Unit: (.+) \(/m.exec(req.prompt)![1]!;
 
+/** The previous description shown in an update prompt, if any. */
+function previousOf(req: CompletionRequest): { steps?: { id: string; covers: string[] }[] } | null {
+  const m = /Previous description[^\n]*\n```json\n([\s\S]*?)\n```/.exec(req.prompt);
+  return m ? (JSON.parse(m[1]!) as { steps?: { id: string; covers: string[] }[] }) : null;
+}
+
 /**
  * A stand-in model that reads the prompt like a model would: it answers with the parameter names it
  * was given and one step per top-level structure key, so every response is valid.
  */
-function answer(req: CompletionRequest, tweak: { dropKey?: string } = {}): Record<string, unknown> {
+function answer(req: CompletionRequest, tweak: { dropKey?: string; summary?: string } = {}): Record<string, unknown> {
   const p = req.prompt;
   const unit = unitOf(req);
+  if (req.task === "context-check") return { summary: null, steps: [] };
   const names = [...(/\nInputs[^\n]*\n([\s\S]*?)\n\n/.exec(p)?.[1] ?? "").matchAll(/^- `([^`]+)`:/gm)].map((m) => m[1]!);
   const returnsType = /\nReturns: (.+)/.exec(p)![1]!;
   const returns = /^(nothing|void|Promise<void>)/.test(returnsType) ? null : { meaning: `What ${unit} returns.` };
-  const base = { summary: `Does what ${unit} does.`, inputs: names.map((n) => ({ name: n, meaning: `The ${n}.` })), returns };
+  const base = { summary: tweak.summary ?? `Does what ${unit} does.`, inputs: names.map((n) => ({ name: n, meaning: `The ${n}.` })), returns };
   if (req.task === "describe-lite") return { ...base, warnings: [] };
 
   const keys = [...(/Structure keys[^\n]*\n([\s\S]*?)\n\n/.exec(p)?.[1] ?? "").matchAll(/^- ([^:]+): (\w+)/gm)].map((m) => ({ key: m[1]!, kind: m[2]! }));
   const steps = keys
     .filter((k) => !k.key.includes(".") && k.key !== tweak.dropKey)
-    .map((k) => ({ kind: ["if", "loop", "switch", "try"].includes(k.kind) ? k.kind : null, text: `Handle part ${k.key}.`, covers: [k.key], steps: [] }));
+    .map((k) => ({ kind: ["if", "loop", "switch", "try"].includes(k.kind) ? k.kind : null, text: `Handle part ${k.key}.`, covers: [k.key], steps: [] as unknown[], id: null as string | null }));
+  // An update keeps the ID of the previous step that covered the same key.
+  const previous = previousOf(req);
+  for (const s of steps) s.id = previous?.steps?.find((q) => q.covers[0] === s.covers[0])?.id ?? null;
+  if (req.task !== "update") for (const s of steps) delete (s as { id?: unknown }).id;
   const warnings = unit === "AccountService.transferFunds" ? [{ kind: "missing-transaction", text: "The two saves are not in a transaction.", covers: ["5", "6"] }] : [];
   return { ...base, steps, warnings };
 }
@@ -56,10 +67,10 @@ describe("sift generate", () => {
     expect(r.out).not.toContain("✗");
     expect(r.code).toBe(EXIT.ok);
     expect(r.out).toContain("Using claude-code; code stays on this machine."); // the fake provider is local
-    expect(r.out).toContain("Describing 29 units in 12 files…");
+    expect(r.out).toContain("Describing or updating 29 units in 12 files…");
     expect(r.out).toMatch(/✓ src\/accounts\/money\.ts#formatCents {2}describe-lite · claude-haiku-5-5 · \d/);
-    expect(r.out).toContain("Described 29 of 29 units. Wrote 12 .sift files.");
-    expect(r.out).toContain("1 warning raised");
+    expect(r.out).toContain("Described 29 new units.\nWrote 12 .sift files.");
+    expect(r.out).toContain("1 warning in the new and updated descriptions");
 
     // Callees are described before their callers, and callers see the callees' summaries.
     const order = provider.requests.map(unitOf);
@@ -99,20 +110,139 @@ describe("sift generate", () => {
     const before = await readFile(join(dir, ".sift/src/accounts/account-service.ts.sift"), "utf8");
     const calls = provider.requests.length;
     const again = await sift(provider, "-C", dir, "generate");
-    expect(again.out).toContain("Nothing to describe");
+    expect(again.out).toContain("Nothing to do: every description matches the code.");
     expect(provider.requests.length).toBe(calls);
     expect(await readFile(join(dir, ".sift/src/accounts/account-service.ts.sift"), "utf8")).toBe(before);
 
-    // A changed unit is kept and reported; --force describes it again with the same ID.
-    const source = join(dir, "src/accounts/money.ts");
-    await writeFile(source, (await readFile(source, "utf8")).replace("Math.floor", "Math.round"));
-    const changed = await sift(provider, "-C", dir, "generate", "src/accounts/money.ts");
-    expect(changed.out).toContain("changed: src/accounts/money.ts#applyMonthlyInterest");
+    // --force describes units again from scratch, keeping their IDs.
     const oldId = idOf(money, "applyMonthlyInterest");
     const forced = await sift(provider, "-C", dir, "generate", "--force", "src/accounts/money.ts");
-    expect(forced.out).toContain("Described 3 of 3 units.");
+    expect(forced.out).toContain("Described 3 new units.");
     expect(idOf((await readSiftFile(dir, "src/accounts/money.ts"))!.file, "applyMonthlyInterest")).toBe(oldId);
   }, 60_000);
+
+  it("syncs after edits: updates changed units, follows renames and moves, removes deleted units, re-checks callers", async () => {
+    const dir = await fixtureCopy();
+    const provider = new FakeProvider((req) => {
+      const unit = unitOf(req);
+      if (req.task === "update" && unit === "PrismaAccountRepository.getAccount") return answer(req, { summary: "Reads an account, failing if it is missing." });
+      if (req.task === "context-check" && unit === "AccountService.withdraw") return { summary: "Withdraws money from an account the user owns.", steps: [] };
+      return answer(req);
+    });
+    expect((await sift(provider, "-C", dir, "generate")).code).toBe(EXIT.ok);
+    const inSync = await sift(provider, "-C", dir, "check");
+    expect(inSync.code).toBe(EXIT.ok);
+    expect(inSync.out).toContain("In sync: 29 described units match the code.");
+
+    const read = async (f: string) => (await readSiftFile(dir, f))!.file;
+    type File = Awaited<ReturnType<typeof read>>;
+    const unit = (file: File, symbol: string) => file.units.find((u) => u.symbol === symbol)!;
+    const before = {
+      money: await read("src/accounts/money.ts"),
+      routes: await read("src/http/routes.ts"),
+      report: await read("src/legacy/report.js"),
+      service: await read("src/accounts/account-service.ts"),
+    };
+
+    // A person edited withdraw's description.
+    const servicePath = join(dir, ".sift/src/accounts/account-service.ts.sift");
+    const serviceText = await readFile(servicePath, "utf8");
+    const edited = serviceText.replace(/(symbol: AccountService\.withdraw\n\s+kind: \w+\n\s+status: )generated/, "$1user-edited");
+    expect(edited).not.toBe(serviceText);
+    await writeFile(servicePath, edited);
+
+    // Code edits: a change, a deletion, a rename (and its caller), a callee whose summary will change, a file move.
+    const edit = async (file: string, from: string, to: string) => {
+      const path = join(dir, file);
+      const text = await readFile(path, "utf8");
+      expect(text).toContain(from);
+      await writeFile(path, text.replace(from, to));
+    };
+    await edit("src/accounts/money.ts", "Math.floor", "Math.round");
+    await edit("src/accounts/money.ts", "export const toCents = (dollars: number): number => Math.round(dollars * 100);\n", "");
+    await edit("src/http/routes.ts", "function statusFor(", "function httpStatusFor(");
+    await edit("src/http/routes.ts", "res.status(statusFor(error))", "res.status(httpStatusFor(error))");
+    await edit("src/accounts/prisma-account-repository.ts", "does not exist`", "was not found`");
+    await mkdir(join(dir, "src/reports"));
+    await rename(join(dir, "src/legacy/report.js"), join(dir, "src/reports/report.js"));
+
+    const status = await sift(provider, "-C", dir, "check");
+    expect(status.code).toBe(EXIT.problems);
+    expect(status.out).toContain(
+      [
+        "Changed since described (3) — generate updates them:",
+        "  src/accounts/money.ts#applyMonthlyInterest",
+        "  src/accounts/prisma-account-repository.ts#PrismaAccountRepository.getAccount",
+        "  src/http/routes.ts#createRouter",
+        "Deleted from the source (1) — generate removes them:",
+        "  src/accounts/money.ts#toCents",
+      ].join("\n"),
+    );
+    expect(status.out).toMatch(/probably renamed \(\d+% similar\): src\/http\/routes\.ts#statusFor → src\/http\/routes\.ts#httpStatusFor/);
+    expect(status.out).toContain("Files moved (1) — generate moves their .sift files:\n  src/legacy/report.js → src/reports/report.js");
+    expect(status.out).toContain("Out of sync");
+    const plan = await sift(provider, "-C", dir, "generate", "--dry-run");
+    expect(plan.out).toContain("src/http/routes.ts#httpStatusFor  renamed and changed · update · claude-opus-5-5 (medium)");
+    expect(plan.out).toContain("5 units may get a context check");
+
+    const calls = provider.requests.length;
+    const sync = await sift(provider, "-C", dir, "generate");
+    expect(sync.err).toBe("");
+    expect(sync.code).toBe(EXIT.ok);
+    const asked = provider.requests.slice(calls);
+    expect(asked.filter((q) => q.task === "update").map(unitOf).sort()).toEqual(["PrismaAccountRepository.getAccount", "applyMonthlyInterest", "createRouter", "httpStatusFor"]);
+    expect(asked.filter((q) => q.task === "context-check").map(unitOf).sort()).toEqual([
+      "AccountService.deposit", "AccountService.getBalance", "AccountService.transferFunds", "AccountService.withdraw",
+    ]);
+    expect(asked.length).toBe(8);
+
+    // The update prompt shows the previous description and the code change.
+    const update = asked.find((q) => unitOf(q) === "applyMonthlyInterest")!;
+    expect(update.promptVersion).toBe("update@1");
+    expect(update.prompt).toContain('"summary": "Does what applyMonthlyInterest does."');
+    expect(update.prompt).toContain("-   const interest = Math.floor(");
+    expect(update.prompt).toContain("+   const interest = Math.round(");
+    // The context check shows the callee summary before and after.
+    const check = asked.find((q) => unitOf(q) === "AccountService.transferFunds")!;
+    expect(check.prompt).toContain("before: Does what PrismaAccountRepository.getAccount does.\n  now: Reads an account, failing if it is missing.");
+
+    const after = {
+      money: await read("src/accounts/money.ts"),
+      routes: await read("src/http/routes.ts"),
+      report: await read("src/reports/report.js"),
+      service: await read("src/accounts/account-service.ts"),
+    };
+    // IDs survive updates, renames, and moves; kept steps keep theirs.
+    const interest = unit(after.money, "applyMonthlyInterest");
+    expect(interest.id).toBe(unit(before.money, "applyMonthlyInterest").id);
+    expect(interest.steps.map((s) => s.id)).toEqual(unit(before.money, "applyMonthlyInterest").steps.map((s) => s.id));
+    expect(interest.generatedBy?.prompt).toBe("update@1");
+    expect(after.money.units.map((u) => u.symbol)).toEqual(["formatCents", "applyMonthlyInterest"]);
+    expect(unit(after.routes, "httpStatusFor").id).toBe(unit(before.routes, "statusFor").id);
+    const routerCalls = unit(after.routes, "createRouter").steps.flatMap(function all(s): string[] {
+      return [...s.calls, ...s.steps.flatMap(all)];
+    });
+    expect(routerCalls).toContain(unit(before.routes, "statusFor").id);
+    expect(after.report.units.map((u) => u.id)).toEqual(before.report.units.map((u) => u.id));
+    expect(existsSync(join(dir, ".sift/src/legacy/report.js.sift"))).toBe(false);
+    // Callers were re-checked: their contextHash follows the new summary; the person's wording went to review.
+    const transfer = unit(after.service, "AccountService.transferFunds");
+    expect(transfer.contextHash).not.toBe(unit(before.service, "AccountService.transferFunds").contextHash);
+    expect(transfer.status).toBe("generated");
+    expect(unit(after.service, "AccountService.withdraw")).toMatchObject({ status: "stale", summary: "Withdraws money from an account the user owns." });
+    expect(sync.out).toContain("review: src/accounts/account-service.ts#AccountService.withdraw");
+    expect(sync.out).toContain("file moved: src/legacy/report.js → src/reports/report.js");
+    expect(sync.out).toContain("deleted: src/accounts/money.ts#toCents");
+
+    // Only the unit waiting for review is left; nothing more to send to the AI.
+    const final = await sift(provider, "-C", dir, "check");
+    expect(final.code).toBe(EXIT.problems);
+    expect(final.out).toContain("Marked stale (1)");
+    expect(final.out).not.toContain("Changed since described");
+    const count = provider.requests.length;
+    await sift(provider, "-C", dir, "generate");
+    expect(provider.requests.length).toBe(count);
+  }, 90_000);
 
   it("retries once with the problems, writes incomplete units as stale, and keeps going after failures", async () => {
     const dir = await fixtureCopy();
@@ -167,10 +297,10 @@ describe("sift generate", () => {
     const plan = await sift(provider, "-C", dir, "generate", "--dry-run", "src/accounts/money.ts");
     expect(plan.out).toBe(
       [
-        "Would describe 3 units:",
-        "  src/accounts/money.ts#formatCents  describe-lite · claude-haiku-5-5 (low)",
-        "  src/accounts/money.ts#toCents  describe-lite · claude-haiku-5-5 (low)",
-        "  src/accounts/money.ts#applyMonthlyInterest  describe · claude-opus-5-5 (medium)",
+        "Would describe or update 3 units:",
+        "  src/accounts/money.ts#formatCents  new · describe-lite · claude-haiku-5-5 (low)",
+        "  src/accounts/money.ts#toCents  new · describe-lite · claude-haiku-5-5 (low)",
+        "  src/accounts/money.ts#applyMonthlyInterest  new · describe · claude-opus-5-5 (medium)",
       ].join("\n"),
     );
     expect(provider.requests).toHaveLength(0);

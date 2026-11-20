@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
-import { readFile, rm } from "node:fs/promises";
+import { readdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
-import type { FileExtraction } from "./adapter.js";
+import type { ExtractedUnit, FileExtraction } from "./adapter.js";
 import { GRAPH_VERSION, type GraphData } from "./graph.js";
 import { SIFT_DIR } from "./config.js";
 import { writeFileAtomic } from "./fs.js";
@@ -26,6 +26,13 @@ interface CachedExtraction {
   extraction: FileExtraction;
 }
 
+/** The source of one version of a unit, kept so a later change can be shown as a diff (design §7.2, §7.4). */
+export interface UnitSource {
+  symbol: string;
+  kind: string;
+  sourceText: string;
+}
+
 interface FingerprintFile {
   version: number;
   files: Record<string, Fingerprint>;
@@ -48,6 +55,37 @@ export class SiftCache {
   async putExtraction(extraction: FileExtraction, adapter: string): Promise<void> {
     const entry: CachedExtraction = { version: CACHE_VERSION, adapter, extraction };
     await writeFileAtomic(this.extractionPath(extraction.path), JSON.stringify(entry));
+  }
+
+  /** The last extraction cached for a path, whatever its hash. */
+  async getLastExtraction(sourcePath: string): Promise<FileExtraction | null> {
+    const cached = await this.readJson<CachedExtraction>(this.extractionPath(sourcePath));
+    return cached && cached.version === CACHE_VERSION && cached.extraction?.path === sourcePath ? cached.extraction : null;
+  }
+
+  /** Remember each unit's source by bodyHash (content-addressed: an existing entry is never rewritten). */
+  async putUnitSources(units: ExtractedUnit[]): Promise<void> {
+    for (const u of units) {
+      const path = this.unitSourcePath(u.bodyHash);
+      if (existsSync(path)) continue;
+      const entry: UnitSource = { symbol: u.symbol, kind: u.kind, sourceText: u.sourceText };
+      await writeFileAtomic(path, JSON.stringify(entry));
+    }
+  }
+
+  async getUnitSource(bodyHash: string): Promise<UnitSource | null> {
+    if (!/^[0-9a-f]+$/.test(bodyHash)) return null;
+    const entry = await this.readJson<UnitSource>(this.unitSourcePath(bodyHash));
+    return entry && typeof entry.sourceText === "string" ? entry : null;
+  }
+
+  /** Remove unit sources no description refers to any more. */
+  async pruneUnitSources(keep: ReadonlySet<string>): Promise<void> {
+    const dir = join(this.dir, "units");
+    if (!existsSync(dir)) return;
+    for (const name of await readdir(dir)) {
+      if (name.endsWith(".json") && !keep.has(name.slice(0, -5))) await rm(join(dir, name), { force: true });
+    }
   }
 
   async getFingerprints(): Promise<Map<string, Fingerprint>> {
@@ -77,6 +115,10 @@ export class SiftCache {
 
   async clear(): Promise<void> {
     await rm(this.dir, { recursive: true, force: true });
+  }
+
+  private unitSourcePath(bodyHash: string): string {
+    return join(this.dir, "units", `${bodyHash}.json`);
   }
 
   private extractionPath(sourcePath: string): string {

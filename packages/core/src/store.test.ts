@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -62,6 +63,10 @@ describe("read / write / list", () => {
     expect(await deleteSiftFile(root, "src/b.ts")).toBe(true);
     expect(await deleteSiftFile(root, "src/b.ts")).toBe(false);
     expect(await listSiftFiles(root)).toEqual(["lib/c.js", "src/a/x.tsx"]);
+    // Folders a deletion empties are removed; .sift/ itself and non-empty folders stay.
+    expect(await deleteSiftFile(root, "lib/c.js")).toBe(true);
+    expect(existsSync(join(root, ".sift/lib"))).toBe(false);
+    expect(existsSync(join(root, ".sift/src/a"))).toBe(true);
   });
 });
 

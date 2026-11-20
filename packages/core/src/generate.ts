@@ -1,26 +1,40 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { CallSite, ExtractedUnit, FileExtraction, LanguageAdapter } from "./adapter.js";
+import { SiftCache } from "./cache.js";
 import type { SiftConfig } from "./config.js";
-import { flatten, renderDescribeInput, type CalleeInfo } from "./describe-input.js";
-import { contextHashOf, deriveSiftUnit, DESCRIBE_LITE_SCHEMA, DESCRIBE_SCHEMA, validateDescribeResponse, type DescribeResponse } from "./describe-output.js";
+import { renderContextCheckInput, renderDescribeInput, type CalleeInfo, flatten } from "./describe-input.js";
+import {
+  CONTEXT_CHECK_SCHEMA,
+  deriveSiftUnit,
+  DESCRIBE_LITE_SCHEMA,
+  DESCRIBE_SCHEMA,
+  rederiveFacts,
+  UPDATE_SCHEMA,
+  validateContextCheckResponse,
+  validateDescribeResponse,
+  type ContextCheckResponse,
+  type DescribeResponse,
+} from "./describe-output.js";
 import { effectsOfUnit } from "./effects.js";
 import { SiftError } from "./errors.js";
 import { externalId, unitId, type CodeGraph } from "./graph.js";
 import { newId } from "./ids.js";
-import { loadExtractions, refreshGraph } from "./project-index.js";
-import { loadPrompt } from "./prompts.js";
+import { loadPrompt, type PromptTemplate } from "./prompts.js";
 import type { CompletionResult, Provider, Task, Tier } from "./provider.js";
 import type { Route, Router } from "./routing.js";
 import type { RuleSet } from "./rules.js";
-import { SIFT_SCHEMA_VERSION, type Effect, type SiftFile, type SiftUnit } from "./schema.js";
-import { listSiftFiles, readSiftFile, writeSiftFile } from "./store.js";
+import { SIFT_SCHEMA_VERSION, type Effect, type SiftFile, type SiftStep, type SiftUnit } from "./schema.js";
+import { deleteSiftFile, writeSiftFile } from "./store.js";
+import { calleeRefsOf, CycleIndex, describedUnits, expectedContextHash, planSync, stronglyConnected, type Ambiguity, type UnitChange } from "./sync.js";
+import { lineDiff } from "./text-diff.js";
 import { validateSiftFile } from "./validate.js";
 
 /**
- * `sift generate` for units without a description (design §7.1). Units that already have one are
- * left alone here; updating changed units arrives with sync (milestone 7). `force` re-describes
- * them, keeping their IDs.
+ * `sift generate` (design §7.1): brings the `.sift` files in line with the source. New units are
+ * described, changed units updated (§7.4), renamed and moved units keep their IDs (§7.2), deleted
+ * units are removed, and units whose callees' summaries changed get a context check (§7.3).
+ * Everything else is kept, with its calls and effects recomputed from the code.
  */
 
 export interface GenerateOptions {
@@ -32,36 +46,51 @@ export interface GenerateOptions {
   router: Router;
   /** Project-relative files or folders to limit the run to. */
   paths?: string[];
+  /** Describe every unit again from scratch, keeping IDs. */
   force?: boolean;
   dryRun?: boolean;
   fullHash?: boolean;
   onEvent?: (event: GenerateEvent) => void;
 }
 
+export type GenerateAction = "describe" | "update" | "context-check";
+
 export type GenerateEvent =
   | { type: "start"; units: number; files: number }
-  | { type: "described"; unit: string; task: Task; model: string; attempts: number; stale: boolean; durationMs: number }
+  | { type: "described"; unit: string; action: GenerateAction; task: Task; model: string; attempts: number; stale: boolean; changed: boolean; durationMs: number }
   | { type: "failed"; unit: string; reason: string }
   | { type: "substituted"; from: Tier; to: Tier; model: string; reason: string };
 
 export interface PlannedUnit {
   /** "file#Symbol" */
   unit: string;
+  action: GenerateAction;
   task: Task;
   route: Route;
-  reason: "new" | "forced";
+  /** Why: "new", "changed", "probable-rename", "forced", or (for context checks) "callees-changed". */
+  reason: UnitChange | "forced" | "callees-changed";
 }
 
 export interface GenerateReport {
+  /** AI work known before the run. Context checks can cascade, so more may run. */
   planned: PlannedUnit[];
-  described: { unit: string; stale: boolean; uncovered: string[]; warnings: number; attempts: number }[];
+  described: { unit: string; action: GenerateAction; stale: boolean; uncovered: string[]; warnings: number; attempts: number; changed: boolean }[];
   failed: { unit: string; reason: string; problems: string[] }[];
-  /** Units that already had a description and were not regenerated. */
-  kept: { unit: string; changed: boolean }[];
-  /** `.sift` units whose symbol no longer exists in the source (handled by sync, milestone 7). */
-  orphaned: string[];
+  /** Units whose description was kept as it is (facts recomputed). */
+  unchanged: string[];
+  /** Units that kept their ID under a new name or in a new file. */
+  renamed: { from: string; to: string; change: "renamed" | "probable-rename" | "moved"; similarity?: number }[];
+  /** Units removed because their code no longer exists. */
+  deleted: string[];
+  movedFiles: { from: string; to: string }[];
+  ambiguous: Ambiguity[];
+  /** Units a person edited whose wording the AI changed: written with status stale for review. */
+  needsReview: string[];
+  /** `.sift` files written. */
   written: string[];
-  /** `.sift` files that could not be read and will be replaced. */
+  /** `.sift` files removed (moved or deleted sources, or no units left). */
+  removed: string[];
+  /** `.sift` files that could not be read and were replaced. */
   replaced: string[];
   redactions: number;
   usage: { inputTokens: number; outputTokens: number; costUsd: number; calls: number };
@@ -75,65 +104,81 @@ interface WorkItem {
   ref: string;
   id: string;
   lite: boolean;
-  reason: "new" | "forced";
+  /** describe: no usable description; update: the code changed; keep: only facts and context. */
+  mode: "describe" | "update" | "keep";
+  reason: PlannedUnit["reason"];
+  previous?: SiftUnit;
 }
 
 export async function generate(options: GenerateOptions): Promise<GenerateReport> {
-  const { root, config, adapters, rules, provider, router } = options;
+  const { root, config, rules, provider, router } = options;
   const emit = options.onEvent ?? (() => {});
   const report: GenerateReport = {
-    planned: [], described: [], failed: [], kept: [], orphaned: [], written: [], replaced: [], redactions: 0,
-    usage: { inputTokens: 0, outputTokens: 0, costUsd: 0, calls: 0 }, substitutions: [], belowMinimum: [],
+    planned: [], described: [], failed: [], unchanged: [], renamed: [], deleted: [], movedFiles: [], ambiguous: [], needsReview: [],
+    written: [], removed: [], replaced: [], redactions: 0, usage: { inputTokens: 0, outputTokens: 0, costUsd: 0, calls: 0 }, substitutions: [], belowMinimum: [],
   };
 
-  const { graph, files } = await refreshGraph({ root, config, adapters, rules, ...(options.fullHash ? { fullHash: true } : {}) });
-  const targets = selectFiles(files, options.paths ?? []);
+  const plan = await planSync(options);
+  const { graph, extractions, existing, targets } = plan;
+  report.replaced = plan.unreadable;
+  report.movedFiles = plan.movedFiles;
+  report.ambiguous = plan.ambiguous;
+  const cycles = new CycleIndex(graph);
 
-  // What is already described, project-wide: IDs and summaries for call references and callee context.
-  const existing = new Map<string, SiftFile>();
-  const known = new Map<string, { id: string; summary?: string }>();
-  for (const source of await listSiftFiles(root)) {
-    try {
-      const stored = await readSiftFile(root, source);
-      if (!stored) continue;
-      existing.set(source, stored.file);
-      for (const u of stored.file.units) known.set(unitId(source, u.symbol), { id: u.id, summary: u.summary });
-    } catch (err) {
-      if (!(err instanceof SiftError)) throw err;
-      if (targets.includes(source)) report.replaced.push(source);
-    }
-  }
-  const takenIds = new Set([...known.values()].map((k) => k.id));
+  const known = describedUnits(plan);
+  const targetSet = new Set(targets);
+  /** Summaries as they were before this run: what the existing descriptions were written against. */
+  const before = new Map(known);
+  const takenIds = new Set<string>();
+  for (const file of existing.values()) for (const u of file.units) takenIds.add(u.id);
 
-  const extractions = await loadExtractions({ root, config, adapters }, graph, files);
   const work: WorkItem[] = [];
-  for (const file of targets) {
-    const extraction = extractions.get(file)!;
-    const old = report.replaced.includes(file) ? undefined : existing.get(file);
-    const oldBySymbol = new Map((old?.units ?? []).map((u) => [u.symbol, u]));
-    for (const unit of extraction.units) {
-      const ref = unitId(file, unit.symbol);
-      const prior = oldBySymbol.get(unit.symbol);
-      if (prior && !options.force) {
-        report.kept.push({ unit: ref, changed: prior.bodyHash !== unit.bodyHash });
-        continue;
-      }
-      const id = prior?.id ?? newId("unit", takenIds);
-      takenIds.add(id);
-      if (!prior) known.set(ref, { id }); // IDs are assigned up front so calls between new units can refer to each other
-      work.push({ file, unit, ref, id, lite: graph.unit(ref)?.lite ?? unit.isSmall, reason: prior ? "forced" : "new" });
+  for (const m of plan.units) {
+    if (m.change === "deleted") {
+      report.deleted.push(unitId(m.file, m.previous!.symbol));
+      continue;
     }
-    const current = new Set(extraction.units.map((u) => u.symbol));
-    for (const u of old?.units ?? []) if (!current.has(u.symbol)) report.orphaned.push(unitId(file, u.symbol));
+    const unit = m.current!;
+    const ref = unitId(m.file, unit.symbol);
+    const prior = m.previous;
+    if (prior && m.change !== "unchanged" && m.change !== "changed") {
+      report.renamed.push({ from: unitId(m.previousFile ?? m.file, prior.symbol), to: ref, change: m.change as "renamed" | "probable-rename" | "moved", ...(m.similarity !== undefined ? { similarity: m.similarity } : {}) });
+    }
+    const id = prior?.id ?? newId("unit", takenIds);
+    takenIds.add(id);
+    if (!prior) known.set(ref, { id }); // IDs are assigned up front so calls between new units can refer to each other
+    const lite = graph.unit(ref)?.lite ?? unit.isSmall;
+    const sameCode = prior !== undefined && prior.bodyHash === unit.bodyHash;
+    let mode: WorkItem["mode"];
+    if (!prior || options.force) mode = "describe";
+    else if (!sameCode || prior.lite !== (lite || undefined)) mode = "update";
+    else mode = "keep";
+    const reason: PlannedUnit["reason"] = options.force && prior ? "forced" : m.change;
+    work.push({ file: m.file, unit, ref, id, lite, mode, reason, ...(prior ? { previous: prior } : {}) });
   }
 
-  report.planned = work.map((w) => {
-    const task: Task = w.lite ? "describe-lite" : "describe";
-    return { unit: w.ref, task, route: router.route(task), reason: w.reason };
-  });
-  if (options.dryRun || work.length === 0) return report;
-  emit({ type: "start", units: work.length, files: new Set(work.map((w) => w.file)).size });
+  const taskOf = (item: WorkItem): Task => (item.lite ? "describe-lite" : item.mode === "update" ? "update" : "describe");
+  for (const w of work) {
+    if (w.mode !== "keep") report.planned.push({ unit: w.ref, action: w.mode, task: taskOf(w), route: router.route(taskOf(w)), reason: w.reason });
+  }
+  // Possible context checks: kept units whose callees are being described again, or whose
+  // contextHash already disagrees with their callees' summaries. They run only if a summary changes.
+  const redescribed = new Set(work.filter((w) => w.mode !== "keep").map((w) => w.ref));
+  for (const w of work) {
+    if (w.mode !== "keep") continue;
+    const refs = calleeRefsOf(w.unit, w.ref, graph, cycles);
+    if (refs.some((r) => redescribed.has(r)) || expectedContextHash(refs, known) !== w.previous!.contextHash) {
+      report.planned.push({ unit: w.ref, action: "context-check", task: "context-check", route: router.route("context-check"), reason: "callees-changed" });
+    }
+  }
+  if (options.dryRun) {
+    return report;
+  }
 
+  const ai = work.filter((w) => w.mode !== "keep").length;
+  if (ai > 0) emit({ type: "start", units: ai, files: new Set(work.filter((w) => w.mode !== "keep").map((w) => w.file)).size });
+
+  const cache = new SiftCache(root);
   const fileTexts = new Map<string, Promise<string>>();
   const textOf = (file: string) => {
     let p = fileTexts.get(file);
@@ -141,23 +186,30 @@ export async function generate(options: GenerateOptions): Promise<GenerateReport
     return p;
   };
   const results = new Map<string, SiftUnit>();
-  const ctx: DescribeContext = { graph, rules, extractions, known, provider, router, report, emit, textOf, substitutions: new Map(), abort: null };
+  const ctx: Context = {
+    graph, rules, extractions, known, before, cycles, provider, router, report, emit, textOf, cache, substitutions: new Map(), abort: null,
+  };
 
-  // Callees before callers, so callers see their callees' summaries; recursion groups go together.
+  // Callees before callers, so callers see their callees' new summaries; recursion groups go together.
   const limit = semaphore(config.concurrency);
-  const groups = stronglyConnected(work, graph);
+  const byRef = new Map(work.map((w) => [w.ref, w]));
+  const edges = (ref: string) => graph.edgesFrom(ref, "calls").flatMap((e) => [e.to, ...graph.implementers(e.to)]).filter((t) => t !== ref && byRef.has(t));
+  const components = stronglyConnected(work.map((w) => w.ref), edges);
+  const componentOf = new Map<string, number>();
+  components.forEach((c, i) => c.forEach((ref) => componentOf.set(ref, i)));
   const done = new Map<number, Promise<void>>();
   const run = (index: number): Promise<void> => {
     let p = done.get(index);
     if (p) return p;
-    const group = groups.components[index]!;
     p = (async () => {
-      await Promise.all([...groups.dependsOn[index]!].map(run));
+      const deps = new Set(components[index]!.flatMap((ref) => edges(ref).map((t) => componentOf.get(t)!)).filter((c) => c !== index));
+      await Promise.all([...deps].map(run));
       await Promise.all(
-        group.map((item) =>
+        components[index]!.map((ref) =>
           limit(async () => {
             if (ctx.abort) return;
-            const unit = await describeOne(item, ctx);
+            const item = byRef.get(ref)!;
+            const unit = await processItem(item, ctx);
             if (unit) {
               results.set(item.ref, unit);
               known.set(item.ref, { id: unit.id, summary: unit.summary });
@@ -169,84 +221,174 @@ export async function generate(options: GenerateOptions): Promise<GenerateReport
     done.set(index, p);
     return p;
   };
-  await Promise.all(groups.components.map((_, i) => run(i)));
+  await Promise.all(components.map((_, i) => run(i)));
 
-  // Write each touched file: kept units unchanged, new ones in source order.
+  // Write: each target file in source order; failed units keep their previous description.
+  const finalUnits = new Map<string, SiftUnit[]>();
   for (const file of targets) {
-    const mine = work.filter((w) => w.file === file && results.has(w.ref));
-    if (mine.length === 0 && !report.replaced.includes(file)) continue;
     const extraction = extractions.get(file)!;
-    const old = report.replaced.includes(file) ? undefined : existing.get(file);
-    const oldBySymbol = new Map((old?.units ?? []).map((u) => [u.symbol, u]));
+    const old = existing.get(file);
     const units: SiftUnit[] = [];
     let current = true;
     for (const u of extraction.units) {
-      const fresh = results.get(unitId(file, u.symbol));
-      const prior = oldBySymbol.get(u.symbol);
+      const ref = unitId(file, u.symbol);
+      const fresh = results.get(ref);
+      const prior = byRef.get(ref)?.previous;
       if (fresh) units.push(fresh);
       else if (prior) {
         units.push(prior);
-        if (prior.bodyHash !== u.bodyHash) current = false;
+        current = false;
       } else current = false; // not described (failed)
     }
-    const symbols = new Set(extraction.units.map((u) => u.symbol));
-    for (const u of old?.units ?? []) {
-      if (!symbols.has(u.symbol)) {
-        units.push(u);
-        current = false;
-      }
+    finalUnits.set(file, units);
+    const moved = plan.movedFiles.find((m) => m.to === file);
+    if (units.length === 0) {
+      if (old && (await deleteSiftFile(root, file))) report.removed.push(file);
+      if (moved && (await deleteSiftFile(root, moved.from))) report.removed.push(moved.from);
+      continue;
     }
-    if (units.length === 0) continue;
     // fileHash says "this .sift file matches the source"; it is only updated when every unit does.
     const fileHash = current || !old ? extraction.fileHash : old.fileHash;
     const next: SiftFile = { sift: SIFT_SCHEMA_VERSION, source: file, language: extraction.language, fileHash, units };
     validateSiftFile(JSON.parse(JSON.stringify(next)), file);
     const written = await writeSiftFile(root, next);
     if (written.changed) report.written.push(written.path);
+    if (moved && (await deleteSiftFile(root, moved.from))) report.removed.push(moved.from);
   }
+  for (const file of plan.deletedFiles) if (await deleteSiftFile(root, file)) report.removed.push(file);
 
   if (ctx.abort) throw ctx.abort;
+  // Old unit sources are kept only while a description still refers to them.
+  if (!options.paths?.length) {
+    const keep = new Set<string>();
+    for (const [source, file] of existing) if (!targetSet.has(source)) for (const u of file.units) keep.add(u.bodyHash);
+    for (const units of finalUnits.values()) for (const u of units) keep.add(u.bodyHash);
+    await cache.pruneUnitSources(keep);
+  }
   return report;
 }
 
-function selectFiles(files: string[], paths: string[]): string[] {
-  if (paths.length === 0) return files;
-  const wanted = paths.map((p) => p.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/$/, ""));
-  const selected = files.filter((f) => wanted.some((p) => p === "" || p === "." || f === p || f.startsWith(`${p}/`)));
-  const unmatched = wanted.filter((p) => p !== "" && p !== "." && !files.some((f) => f === p || f.startsWith(`${p}/`)));
-  if (unmatched.length > 0) {
-    throw new SiftError(
-      "SOURCE_NOT_FOUND",
-      `No source files match ${unmatched.map((p) => `"${p}"`).join(", ")}.`,
-      ["Paths are relative to the project root and must be included by sift.config.yaml."],
-    );
-  }
-  return selected;
-}
-
-interface DescribeContext {
+interface Context {
   graph: CodeGraph;
   rules: RuleSet;
   extractions: Map<string, FileExtraction>;
   known: Map<string, { id: string; summary?: string }>;
+  before: Map<string, { id: string; summary?: string }>;
+  cycles: CycleIndex;
   provider: Provider;
   router: Router;
   report: GenerateReport;
   emit: (event: GenerateEvent) => void;
   textOf: (file: string) => Promise<string>;
+  cache: SiftCache;
   /** Tier → tier used instead, once a model turned out to be unavailable in this run. */
   substitutions: Map<Tier, Tier>;
   /** Set when the run must stop (e.g. not logged in); remaining units are skipped. */
   abort: SiftError | null;
 }
 
-async function describeOne(item: WorkItem, ctx: DescribeContext): Promise<SiftUnit | null> {
+async function processItem(item: WorkItem, ctx: Context): Promise<SiftUnit | null> {
+  if (item.mode !== "keep") return describeOne(item, ctx);
+  const { nodes: nodeEffects } = effectsOfUnit(item.unit, ctx.rules);
+  const facts = { nodeEffects, callRefs: (c: CallSite) => callRefs(c, ctx), calleeEffects: (c: CallSite) => calleeEffects(c, ctx) };
+  const kept = rederiveFacts(item.previous!, item.unit, facts);
+  const expected = expectedContextHash(calleeRefsOf(item.unit, item.ref, ctx.graph, ctx.cycles), ctx.known);
+  if (expected === item.previous!.contextHash) {
+    ctx.report.unchanged.push(item.ref);
+    return kept;
+  }
+  setContextHash(kept, expected);
+  let changes = contextChanges(item, ctx.graph, ctx.cycles, ctx.before, ctx.known);
+  if (changes.length === 0) {
+    // The summaries changed before this run (e.g. edited by hand): which ones is unknown, so show them all.
+    changes = calleeRefsOf(item.unit, item.ref, ctx.graph, ctx.cycles).flatMap((ref) => {
+      const after = ctx.known.get(ref)?.summary;
+      return after ? [{ name: ref.slice(ref.indexOf("#") + 1), after }] : [];
+    });
+  }
+  if (changes.length === 0) {
+    ctx.report.unchanged.push(item.ref);
+    return kept;
+  }
+  return contextCheck(item, kept, changes, ctx);
+}
+
+/** Callees whose summary differs from the one the description was written against. */
+function contextChanges(
+  item: WorkItem,
+  graph: CodeGraph,
+  cycles: CycleIndex,
+  before: Map<string, { summary?: string }>,
+  now: Map<string, { summary?: string }>,
+): { name: string; before?: string; after: string }[] {
+  return calleeRefsOf(item.unit, item.ref, graph, cycles).flatMap((ref) => {
+    const after = now.get(ref)?.summary;
+    const was = before.get(ref)?.summary;
+    if (!after || after === was) return [];
+    return [{ name: ref.slice(ref.indexOf("#") + 1), ...(was ? { before: was } : {}), after }];
+  });
+}
+
+function setContextHash(unit: SiftUnit, hash: string | undefined): void {
+  if (hash) unit.contextHash = hash;
+  else delete unit.contextHash;
+}
+
+async function contextCheck(item: WorkItem, kept: SiftUnit, changes: { name: string; before?: string; after: string }[], ctx: Context): Promise<SiftUnit | null> {
   const started = Date.now();
-  const task: Task = item.lite ? "describe-lite" : "describe";
+  const task: Task = "context-check";
   const template = await loadPrompt(task);
-  const schema = item.lite ? DESCRIBE_LITE_SCHEMA : DESCRIBE_SCHEMA;
+  const prompt = renderContextCheckInput({ file: item.file, unit: kept, changes });
+  const stepIds = new Set<string>();
+  const index = (steps: SiftStep[]): void => steps.forEach((s) => (stepIds.add(s.id), index(s.steps)));
+  index(kept.steps);
+  const outcome = await askWithRetry(ctx, item, task, template, prompt, CONTEXT_CHECK_SCHEMA, (json) => {
+    const v = validateContextCheckResponse(json, stepIds);
+    return { value: v.response, problems: v.problems, soft: false };
+  });
+  if (!outcome) return null;
+  const response: ContextCheckResponse = outcome.value;
+  const updated = structuredClone(kept);
+  let changed = false;
+  if (response.summary !== null && response.summary !== updated.summary) {
+    updated.summary = response.summary;
+    changed = true;
+  }
+  const texts = new Map(response.steps.map((s) => [s.id, s.text]));
+  const apply = (steps: SiftStep[]): void =>
+    steps.forEach((s) => {
+      const t = texts.get(s.id);
+      if (t !== undefined && t !== s.text) (s.text = t), (changed = true);
+      apply(s.steps);
+    });
+  apply(updated.steps);
+  if (changed) markEdited(updated, item, ctx);
+  ctx.report.described.push({ unit: item.ref, action: "context-check", stale: updated.status === "stale", uncovered: [], warnings: updated.warnings.length, attempts: outcome.attempts, changed });
+  ctx.emit({ type: "described", unit: item.ref, action: "context-check", task, model: outcome.route.choice.model, attempts: outcome.attempts, stale: updated.status === "stale", changed, durationMs: Date.now() - started });
+  return updated;
+}
+
+/** After the AI changed a kept description's wording: a person's wording goes to review; verified no longer holds. */
+function markEdited(unit: SiftUnit, item: WorkItem, ctx: Context): void {
+  if (item.previous?.status === "user-edited") {
+    unit.status = "stale";
+    ctx.report.needsReview.push(item.ref);
+  } else if (unit.status === "verified" || unit.status === "user-edited") unit.status = "generated";
+}
+
+async function describeOne(item: WorkItem, ctx: Context): Promise<SiftUnit | null> {
+  const started = Date.now();
+  const updating = item.mode === "update";
+  const task: Task = item.lite ? "describe-lite" : updating ? "update" : "describe";
+  const template = await loadPrompt(task);
+  const schema = item.lite ? DESCRIBE_LITE_SCHEMA : updating ? UPDATE_SCHEMA : DESCRIBE_SCHEMA;
   const { nodes: nodeEffects } = effectsOfUnit(item.unit, ctx.rules);
 
+  let previous: { unit: SiftUnit; diff: string | null } | undefined;
+  if (updating) {
+    const old = await ctx.cache.getUnitSource(item.previous!.bodyHash);
+    previous = { unit: item.previous!, diff: old ? lineDiff(dedentText(old.sourceText), dedentText(item.unit.sourceText)) : null };
+  }
   const input = renderDescribeInput({
     file: item.file,
     unit: item.unit,
@@ -254,19 +396,86 @@ async function describeOne(item: WorkItem, ctx: DescribeContext): Promise<SiftUn
     lite: item.lite,
     nodeEffects,
     callees: calleesOf(item, ctx),
+    ...(previous ? { previous } : {}),
   });
   ctx.report.redactions += input.redactions;
 
-  const schemaNote = ctx.provider.capabilities.nativeJsonSchema ? "" : `\n\nRespond with one JSON object matching this JSON Schema:\n${JSON.stringify(schema)}`;
-  const basePrompt = `${input.prompt}${schemaNote}`;
+  const previousStepIds = new Set<string>();
+  const index = (steps: SiftStep[]): void => steps.forEach((s) => (previousStepIds.add(s.id), index(s.steps)));
+  if (updating && !item.lite) index(item.previous!.steps);
+  const outcome = await askWithRetry(ctx, item, task, template, input.prompt, schema, (json) => {
+    const v = validateDescribeResponse(json, item.unit, item.lite, updating && !item.lite ? previousStepIds : undefined);
+    // Coverage is the one problem a unit may still be written with, as stale.
+    const hard = v.problems.length - (v.uncovered.length > 0 ? 1 : 0);
+    return { value: v.response ? { response: v.response, uncovered: v.uncovered } : null, problems: v.problems, soft: hard === 0 && v.response !== null };
+  });
+  if (!outcome) return null;
+  const { response, uncovered } = outcome.value as { response: DescribeResponse; uncovered: string[] };
 
+  const unit = deriveSiftUnit({
+    unit: item.unit,
+    response,
+    id: item.id,
+    lite: item.lite,
+    uncovered,
+    nodeEffects,
+    callRefs: (call) => callRefs(call, ctx),
+    calleeEffects: (call) => calleeEffects(call, ctx),
+    generatedBy: { provider: outcome.route.choice.provider, model: outcome.route.choice.model, prompt: template.id, belowTier: outcome.route.belowTier },
+    ...(item.previous ? { previousWarnings: item.previous.warnings } : {}),
+  });
+  setContextHash(unit, expectedContextHash(calleeRefsOf(item.unit, item.ref, ctx.graph, ctx.cycles), ctx.known));
+  let changed = true;
+  if (updating && item.previous!.status === "user-edited") {
+    if (unit.status !== "stale" && keepsWording(item.previous!, unit)) unit.status = "user-edited";
+    else markEdited(unit, item, ctx);
+  }
+  if (updating) changed = JSON.stringify(proseOf(item.previous!)) !== JSON.stringify(proseOf(unit));
+  ctx.report.described.push({ unit: item.ref, action: item.mode as GenerateAction, stale: unit.status === "stale", uncovered, warnings: unit.warnings.length, attempts: outcome.attempts, changed });
+  ctx.emit({ type: "described", unit: item.ref, action: item.mode as GenerateAction, task, model: outcome.route.choice.model, attempts: outcome.attempts, stale: unit.status === "stale", changed, durationMs: Date.now() - started });
+  return unit;
+}
+
+/** True when every piece of a person's wording that the update kept is unchanged. */
+function keepsWording(previous: SiftUnit, next: SiftUnit): boolean {
+  if (previous.summary !== next.summary) return false;
+  if (previous.returns && next.returns && previous.returns.meaning !== next.returns.meaning) return false;
+  for (const i of previous.inputs) {
+    const now = next.inputs.find((n) => n.name === i.name);
+    if (now && now.meaning !== i.meaning) return false;
+  }
+  const old = new Map<string, string>();
+  const index = (steps: SiftStep[]): void => steps.forEach((s) => (old.set(s.id, s.text), index(s.steps)));
+  index(previous.steps);
+  const check = (steps: SiftStep[]): boolean => steps.every((s) => (!old.has(s.id) || old.get(s.id) === s.text) && check(s.steps));
+  return check(next.steps);
+}
+
+/** The AI-written parts of a unit, to tell whether an update changed any wording. */
+function proseOf(u: SiftUnit): unknown {
+  const step = (s: SiftStep): unknown => [s.id, s.kind, s.text, s.covers, s.steps.map(step)];
+  return [u.summary, u.inputs.map((i) => i.meaning), u.returns?.meaning, u.steps.map(step), u.warnings.map((w) => [w.kind, w.text])];
+}
+
+/**
+ * Send a prompt, validate the reply, and retry once with the problems (design §8). `check` says
+ * whether the reply is usable; `soft` replies are accepted after the retry despite problems.
+ */
+async function askWithRetry<T>(
+  ctx: Context,
+  item: WorkItem,
+  task: Task,
+  template: PromptTemplate,
+  basePrompt: string,
+  schema: object,
+  check: (json: unknown) => { value: T | null; problems: string[]; soft: boolean },
+): Promise<{ value: T; attempts: number; route: Route } | null> {
+  const schemaNote = ctx.provider.capabilities.nativeJsonSchema ? "" : `\n\nRespond with one JSON object matching this JSON Schema:\n${JSON.stringify(schema)}`;
+  const first = `${basePrompt}${schemaNote}`;
   let route = ctx.router.route(task);
-  let prompt = basePrompt;
-  let attempts = 0;
-  let validation = { response: null as DescribeResponse | null, problems: [] as string[], uncovered: [] as string[] };
+  let prompt = first;
   try {
-    while (attempts < 2) {
-      attempts++;
+    for (let attempts = 1; attempts <= 2; attempts++) {
       const budget = ctx.provider.capabilities.contextTokens(route.choice.model);
       if ((template.text.length + prompt.length) / 4 > budget) {
         fail(item, ctx, `the prompt is larger than ${route.choice.model}'s context budget`, []);
@@ -276,17 +485,19 @@ async function describeOne(item: WorkItem, ctx: DescribeContext): Promise<SiftUn
         task, model: route.choice, promptVersion: template.id, system: template.text, prompt, jsonSchema: schema,
       });
       route = used;
-      validation =
+      const checked =
         result.json === undefined
-          ? { response: null, problems: ["The response was not valid JSON. Respond with the JSON object only."], uncovered: [] }
-          : validateDescribeResponse(result.json, item.unit, item.lite);
-      const hard = validation.problems.length - (validation.uncovered.length > 0 ? 1 : 0);
-      if (validation.problems.length === 0 || (attempts === 2 && hard === 0 && validation.response)) break;
+          ? { value: null, problems: ["The response was not valid JSON. Respond with the JSON object only."], soft: false }
+          : check(result.json);
+      if (checked.value !== null && (checked.problems.length === 0 || (attempts === 2 && checked.soft))) {
+        if (route.belowMinimum && !ctx.report.belowMinimum.includes(item.ref)) ctx.report.belowMinimum.push(item.ref);
+        return { value: checked.value, attempts, route };
+      }
       if (attempts === 2) {
-        fail(item, ctx, "the response did not pass validation after one retry", validation.problems);
+        fail(item, ctx, "the response did not pass validation after one retry", checked.problems);
         return null;
       }
-      prompt = `${basePrompt}\n\nYour previous response had these problems. Return a corrected JSON object.\n${validation.problems.map((p) => `- ${p}`).join("\n")}`;
+      prompt = `${first}\n\nYour previous response had these problems. Return a corrected JSON object.\n${checked.problems.map((p) => `- ${p}`).join("\n")}`;
     }
   } catch (err) {
     if (err instanceof SiftError && err.code === "PROVIDER_AUTH") {
@@ -294,53 +505,18 @@ async function describeOne(item: WorkItem, ctx: DescribeContext): Promise<SiftUn
       return null;
     }
     fail(item, ctx, err instanceof Error ? err.message : String(err), []);
-    return null;
   }
-
-  if (route.belowMinimum) ctx.report.belowMinimum.push(item.ref);
-  const calleeSummaries: { id: string; summary: string }[] = [];
-  const addCallee = (ref: string) => {
-    const k = ctx.known.get(ref);
-    if (k?.summary && ref !== item.ref) calleeSummaries.push({ id: k.id, summary: k.summary });
-  };
-  for (const node of flatten(item.unit.body)) {
-    for (const call of node.calls) {
-      if (!call.target || call.external) continue;
-      const ref = unitId(call.target.file, call.target.symbol);
-      addCallee(ref);
-      for (const impl of ctx.graph.implementers(ref)) addCallee(impl);
-    }
-  }
-
-  const unit = deriveSiftUnit({
-    unit: item.unit,
-    response: validation.response!,
-    id: item.id,
-    lite: item.lite,
-    uncovered: validation.uncovered,
-    nodeEffects,
-    callRefs: (call) => callRefs(call, ctx),
-    calleeEffects: (call) => calleeEffects(call, ctx),
-    generatedBy: { provider: route.choice.provider, model: route.choice.model, prompt: template.id, belowTier: route.belowTier },
-    ...withContextHash(contextHashOf(calleeSummaries)),
-  });
-  ctx.report.described.push({ unit: item.ref, stale: unit.status === "stale", uncovered: validation.uncovered, warnings: unit.warnings.length, attempts });
-  ctx.emit({ type: "described", unit: item.ref, task, model: route.choice.model, attempts, stale: unit.status === "stale", durationMs: Date.now() - started });
-  return unit;
+  return null;
 }
 
-function withContextHash(hash: string | undefined): { contextHash?: string } {
-  return hash ? { contextHash: hash } : {};
-}
-
-function fail(item: WorkItem, ctx: DescribeContext, reason: string, problems: string[]): void {
+function fail(item: WorkItem, ctx: Context, reason: string, problems: string[]): void {
   ctx.report.failed.push({ unit: item.ref, reason, problems });
   ctx.emit({ type: "failed", unit: item.ref, reason });
 }
 
 /** Call the provider, walking the routing fallbacks (design §4.2) if the model is unavailable. */
 async function completeWithFallback(
-  ctx: DescribeContext,
+  ctx: Context,
   task: Task,
   route: Route,
   request: Parameters<Provider["complete"]>[0],
@@ -373,7 +549,7 @@ async function completeWithFallback(
   }
 }
 
-function callRefs(call: CallSite, ctx: DescribeContext): string[] {
+function callRefs(call: CallSite, ctx: Context): string[] {
   if (call.external) return [externalId(call.external.module, call.external.name)];
   if (!call.target) return [];
   const ref = unitId(call.target.file, call.target.symbol);
@@ -386,7 +562,7 @@ function callRefs(call: CallSite, ctx: DescribeContext): string[] {
   });
 }
 
-function calleeEffects(call: CallSite, ctx: DescribeContext): Effect[] {
+function calleeEffects(call: CallSite, ctx: Context): Effect[] {
   if (!call.target || call.external) return [];
   const ref = unitId(call.target.file, call.target.symbol);
   const out = new Set<Effect>();
@@ -396,7 +572,7 @@ function calleeEffects(call: CallSite, ctx: DescribeContext): Effect[] {
   return [...out];
 }
 
-function calleesOf(item: WorkItem, ctx: DescribeContext): CalleeInfo[] {
+function calleesOf(item: WorkItem, ctx: Context): CalleeInfo[] {
   const out: CalleeInfo[] = [];
   const seen = new Set<string>();
   for (const node of flatten(item.unit.body)) {
@@ -433,58 +609,14 @@ function calleesOf(item: WorkItem, ctx: DescribeContext): CalleeInfo[] {
   return out;
 }
 
-/** Tarjan's algorithm over the call graph restricted to the units being described. */
-function stronglyConnected(work: WorkItem[], graph: CodeGraph): { components: WorkItem[][]; dependsOn: Set<number>[] } {
-  const byRef = new Map(work.map((w) => [w.ref, w]));
-  const edges = new Map<string, string[]>();
-  for (const w of work) {
-    const targets = new Set<string>();
-    for (const e of graph.edgesFrom(w.ref, "calls")) {
-      for (const t of [e.to, ...graph.implementers(e.to)]) if (byRef.has(t) && t !== w.ref) targets.add(t);
-    }
-    edges.set(w.ref, [...targets]);
-  }
-
-  let counter = 0;
-  const index = new Map<string, number>();
-  const low = new Map<string, number>();
-  const stack: string[] = [];
-  const onStack = new Set<string>();
-  const componentOf = new Map<string, number>();
-  const components: WorkItem[][] = [];
-
-  const visit = (v: string) => {
-    index.set(v, counter);
-    low.set(v, counter);
-    counter++;
-    stack.push(v);
-    onStack.add(v);
-    for (const w of edges.get(v) ?? []) {
-      if (!index.has(w)) {
-        visit(w);
-        low.set(v, Math.min(low.get(v)!, low.get(w)!));
-      } else if (onStack.has(w)) low.set(v, Math.min(low.get(v)!, index.get(w)!));
-    }
-    if (low.get(v) === index.get(v)) {
-      const component: WorkItem[] = [];
-      let w: string;
-      do {
-        w = stack.pop()!;
-        onStack.delete(w);
-        componentOf.set(w, components.length);
-        component.push(byRef.get(w)!);
-      } while (w !== v);
-      components.push(component);
-    }
-  };
-  for (const w of work) if (!index.has(w.ref)) visit(w.ref);
-
-  const dependsOn = components.map((component, i) => {
-    const deps = new Set<number>();
-    for (const item of component) for (const t of edges.get(item.ref) ?? []) if (componentOf.get(t) !== i) deps.add(componentOf.get(t)!);
-    return deps;
-  });
-  return { components, dependsOn };
+/** Remove the indentation all non-blank lines share. */
+function dedentText(text: string): string {
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const indents = lines.filter((l) => l.trim() !== "").map((l) => /^[ \t]*/.exec(l)![0].length);
+  // The first line of a unit's source starts at the declaration, without its indentation.
+  const rest = indents.slice(1);
+  const cut = rest.length > 0 ? Math.min(...rest) : 0;
+  return lines.map((l, i) => (i === 0 ? l : l.slice(Math.min(cut, /^[ \t]*/.exec(l)![0].length)))).join("\n");
 }
 
 function semaphore(max: number): <T>(fn: () => Promise<T>) => Promise<T> {

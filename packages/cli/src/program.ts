@@ -13,6 +13,8 @@ import {
   SiftError,
   siftPathFor,
   generate,
+  isInSync,
+  syncStatus,
   loadLocalOverrides,
   loadModelMap,
   Router,
@@ -23,7 +25,7 @@ import {
 } from "@sift/core";
 import { typescriptAdapter } from "@sift/adapter-typescript";
 import { claudeCodeProvider } from "@sift/provider-claude-code";
-import { renderGenerateReport, renderModels, renderPlan } from "./generate-render.js";
+import { renderGenerateReport, renderModels, renderPlan, renderStatus } from "./generate-render.js";
 import { renderCallees, renderCallers, renderImpact } from "./graph-render.js";
 import { renderSift, renderStructure } from "./render.js";
 
@@ -74,8 +76,6 @@ const processIO: CliIO = {
 
 /** Commands that exist in the design but arrive in later milestones. */
 const PLANNED: { name: string; args?: string; summary: string; availableIn: string }[] = [
-  { name: "status", summary: "List stale, new, deleted, and unverified units", availableIn: "milestone 7" },
-  { name: "check", summary: "Exit non-zero if any .sift file is stale or missing (for CI and hooks)", availableIn: "milestone 7" },
   { name: "eval", summary: "Run the evaluation harness", availableIn: "milestone 8" },
   { name: "qualify", args: "<provider:model>", summary: "Test a model and assign it a tier", availableIn: "the bring-your-own-key providers" },
 ];
@@ -250,9 +250,9 @@ export function buildProgram(io: CliIO = processIO, deps: CliDeps = {}): Command
 
   program
     .command("generate [paths...]")
-    .description("Describe source units that have no description yet, and write their .sift files")
-    .option("--dry-run", "list the units that would be described, and the models, without calling the AI")
-    .option("--force", "describe units again even if they already have a description (IDs are kept)")
+    .description("Bring the .sift files in line with the code: describe new units, update changed ones, follow renames and moves")
+    .option("--dry-run", "list what would be described or updated, and the models, without calling the AI")
+    .option("--force", "describe every unit again from scratch (IDs are kept)")
     .option("--full-hash", "hash every file instead of trusting size and modification time")
     .option("--json", "print the run report as JSON")
     .action(async (paths: string[], opts: { dryRun?: boolean; force?: boolean; fullHash?: boolean; json?: boolean }, cmd: Command) => {
@@ -285,9 +285,10 @@ export function buildProgram(io: CliIO = processIO, deps: CliDeps = {}): Command
         onEvent: opts.json
           ? undefined
           : (e) => {
-              if (e.type === "start") io.out(`Describing ${e.units} unit${e.units === 1 ? "" : "s"} in ${e.files} file${e.files === 1 ? "" : "s"}…`);
+              if (e.type === "start") io.out(`Describing or updating ${e.units} unit${e.units === 1 ? "" : "s"} in ${e.files} file${e.files === 1 ? "" : "s"}…`);
               else if (e.type === "described") {
-                const notes = [e.attempts > 1 ? "after a retry" : "", e.stale ? "incomplete, marked stale" : ""].filter(Boolean).join(", ");
+                const outcome = e.action === "context-check" ? (e.changed ? "reworded" : "no change needed") : e.action === "update" && !e.changed ? "no change needed" : "";
+                const notes = [outcome, e.attempts > 1 ? "after a retry" : "", e.stale ? "marked stale" : ""].filter(Boolean).join(", ");
                 io.out(`  ✓ ${e.unit}  ${e.task} · ${e.model} · ${(e.durationMs / 1000).toFixed(1)}s${notes ? ` · ${notes}` : ""}`);
               } else if (e.type === "failed") io.out(`  ✗ ${e.unit}: ${e.reason}`);
               else io.out(`  ! ${e.model} is used instead of the ${e.from} tier: ${e.reason}`);
@@ -297,6 +298,31 @@ export function buildProgram(io: CliIO = processIO, deps: CliDeps = {}): Command
       else io.out(opts.dryRun ? renderPlan(report) : renderGenerateReport(report));
       if (report.failed.length > 0 && deps.state) deps.state.exitCode = EXIT.problems;
     });
+
+  const statusAction = (check: boolean) => async (opts: { json?: boolean; fullHash?: boolean }, cmd: Command) => {
+    const project = await loadProject(cwdOf(cmd));
+    const loaded = await loadRulePacks(project.root, { builtinDir: builtinRulesDir() });
+    // In CI a fresh checkout's modification times say nothing, so check hashes every file there (design §5.1).
+    const fullHash = opts.fullHash === true || process.env.SIFT_FULL_HASH === "1" || (check && Boolean(process.env.CI));
+    const report = await syncStatus({ root: project.root, config: project.config, adapters: ADAPTERS, rules: new RuleSet(loaded.packs), fullHash });
+    const inSync = isInSync(report);
+    io.out(opts.json ? JSON.stringify({ inSync, ...report }, null, 2) : renderStatus(report, inSync));
+    if (check && !inSync && deps.state) deps.state.exitCode = EXIT.problems;
+  };
+
+  program
+    .command("status")
+    .description("List units whose description is out of date: changed, new, deleted, renamed, stale, or with changed callees")
+    .option("--full-hash", "hash every file instead of trusting size and modification time")
+    .option("--json", "print raw JSON")
+    .action(statusAction(false));
+
+  program
+    .command("check")
+    .description("Like status, but exit with code 1 if any description is out of date (for CI and hooks)")
+    .option("--full-hash", "hash every file (the default when the CI environment variable is set)")
+    .option("--json", "print raw JSON")
+    .action(statusAction(true));
 
   program
     .command("models")

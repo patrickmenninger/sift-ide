@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
-import { readdir, readFile, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { readdir, readFile, rm, rmdir } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { SIFT_DIR } from "./config.js";
 import { SiftError } from "./errors.js";
 import { writeFileAtomic } from "./fs.js";
@@ -75,6 +75,12 @@ export async function deleteSiftFile(root: string, sourcePath: string): Promise<
   const abs = join(root, siftPathFor(sourcePath));
   if (!existsSync(abs)) return false;
   await rm(abs);
+  // Remove folders the deletion left empty, up to (not including) .sift/.
+  const base = join(root, SIFT_DIR);
+  for (let dir = dirname(abs); dir.length > base.length && dir.startsWith(base); dir = dirname(dir)) {
+    if ((await readdir(dir)).length > 0) break;
+    await rmdir(dir);
+  }
   return true;
 }
 

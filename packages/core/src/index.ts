@@ -10,6 +10,8 @@ export * from "./fake-provider.js";
 export * from "./freshness.js";
 export * from "./fs.js";
 export * from "./generate.js";
+export * from "./sync.js";
+export * from "./text-diff.js";
 export * from "./glob.js";
 export * from "./graph.js";
 export * from "./ids.js";

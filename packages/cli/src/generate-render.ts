@@ -1,35 +1,65 @@
-import { TASK_TIERS, type GenerateReport, type Route } from "@sift/core";
+import { TASK_TIERS, type GenerateReport, type PlannedUnit, type Route, type StatusReport } from "@sift/core";
+
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
 export function renderPlan(report: GenerateReport): string {
   const out: string[] = [];
-  if (report.planned.length === 0) out.push("Nothing to describe: every unit in these files already has a description.");
-  else {
-    out.push(`Would describe ${report.planned.length} unit${report.planned.length === 1 ? "" : "s"}:`);
-    for (const p of report.planned) {
-      out.push(`  ${p.unit}  ${p.task} · ${p.route.choice.model}${p.route.choice.effort ? ` (${p.route.choice.effort})` : ""}${p.reason === "forced" ? " · again (--force)" : ""}`);
-    }
+  const work = report.planned.filter((p) => p.action !== "context-check");
+  const checks = report.planned.filter((p) => p.action === "context-check");
+  if (work.length === 0 && checks.length === 0) out.push("Nothing to do: every description matches the code.");
+  if (work.length > 0) {
+    out.push(`Would describe or update ${plural(work.length, "unit")}:`);
+    for (const p of work) out.push(`  ${p.unit}  ${reasonLabel(p)} · ${p.task} · ${model(p.route)}`);
   }
-  out.push(...keptNotes(report));
+  if (checks.length > 0) {
+    out.push(`${plural(checks.length, "unit")} may get a context check if their callees' summaries change (${model(checks[0]!.route)}):`);
+    for (const p of checks) out.push(`  ${p.unit}`);
+  }
+  out.push(...structuralNotes(report));
   return out.join("\n");
+}
+
+function reasonLabel(p: PlannedUnit): string {
+  switch (p.reason) {
+    case "new":
+      return "new";
+    case "forced":
+      return "again (--force)";
+    case "probable-rename":
+      return "renamed and changed";
+    default:
+      return "changed";
+  }
+}
+
+function model(route: Route): string {
+  return `${route.choice.model}${route.choice.effort ? ` (${route.choice.effort})` : ""}`;
 }
 
 export function renderGenerateReport(report: GenerateReport): string {
   const out: string[] = [];
-  if (report.planned.length === 0) {
-    out.push("Nothing to describe: every unit in these files already has a description.", ...keptNotes(report));
-    return out.join("\n");
+  const count = (action: string) => report.described.filter((d) => d.action === action);
+  const described = count("describe");
+  const updated = count("update");
+  const checked = count("context-check");
+  const reworded = checked.filter((d) => d.changed);
+  const parts = [
+    described.length > 0 ? `described ${plural(described.length, "new unit")}` : "",
+    updated.length > 0 ? `updated ${updated.length} changed` : "",
+    checked.length > 0 ? `checked ${checked.length} against new callee summaries (${reworded.length} reworded)` : "",
+    report.renamed.length > 0 ? `kept ${report.renamed.length} renamed or moved` : "",
+    report.deleted.length > 0 ? `removed ${report.deleted.length} deleted` : "",
+  ].filter(Boolean);
+  const head = parts.length > 0 ? `${parts.join(", ")}.` : "Nothing to do: every description matches the code.";
+  out.push("", head.charAt(0).toUpperCase() + head.slice(1));
+  if (report.failed.length > 0) out.push(`${plural(report.failed.length, "unit")} failed and kept their previous description, if any.`);
+  if (report.written.length + report.removed.length > 0) {
+    out.push(`Wrote ${plural(report.written.length, ".sift file")}${report.removed.length > 0 ? `, removed ${report.removed.length}` : ""}.`);
   }
-  const stale = report.described.filter((d) => d.stale);
-  out.push(
-    "",
-    `Described ${report.described.length} of ${report.planned.length} unit${report.planned.length === 1 ? "" : "s"}` +
-      `${stale.length > 0 ? ` (${stale.length} incomplete, marked stale)` : ""}` +
-      `${report.failed.length > 0 ? `; ${report.failed.length} failed` : ""}.` +
-      ` Wrote ${report.written.length} .sift file${report.written.length === 1 ? "" : "s"}.`,
-  );
-  const warnings = report.described.reduce((n, d) => n + d.warnings, 0);
-  if (warnings > 0) out.push(`${warnings} warning${warnings === 1 ? "" : "s"} raised; see them with "sift show <file>".`);
-  for (const s of stale) out.push(`  stale: ${s.unit} (no step covers ${s.uncovered.join(", ")})`);
+  const warnings = [...described, ...updated].reduce((n, d) => n + d.warnings, 0);
+  if (warnings > 0) out.push(`${plural(warnings, "warning")} in the new and updated descriptions; see them with "sift show <file>".`);
+  for (const s of report.described.filter((d) => d.stale && d.uncovered.length > 0)) out.push(`  stale: ${s.unit} (no step covers ${s.uncovered.join(", ")})`);
+  for (const r of report.needsReview) out.push(`  review: ${r} (a person's wording was changed; marked stale)`);
   for (const f of report.failed) {
     out.push(`  failed: ${f.unit}: ${f.reason}`);
     for (const p of f.problems.slice(0, 5)) out.push(`    - ${p}`);
@@ -37,31 +67,63 @@ export function renderGenerateReport(report: GenerateReport): string {
   const u = report.usage;
   if (u.calls > 0) {
     const cost = u.costUsd > 0 ? ` · about $${u.costUsd.toFixed(2)} at API prices (on a subscription this is an estimate, not a bill)` : "";
-    out.push(`${u.calls} AI call${u.calls === 1 ? "" : "s"} · ${fmt(u.inputTokens)} tokens in, ${fmt(u.outputTokens)} out${cost}`);
+    out.push(`${plural(u.calls, "AI call")} · ${fmt(u.inputTokens)} tokens in, ${fmt(u.outputTokens)} out${cost}`);
   }
   if (report.redactions > 0) out.push(`Replaced ${report.redactions} possible secret${report.redactions === 1 ? "" : "s"} with "<redacted>" before sending.`);
   for (const s of report.substitutions) out.push(`Used ${s.model} (${s.to} tier) because the ${s.from} tier's model was unavailable.`);
-  if (report.belowMinimum.length > 0) out.push(`${report.belowMinimum.length} unit(s) were described below their task's minimum tier; consider regenerating them with a stronger model.`);
+  if (report.belowMinimum.length > 0) out.push(`${plural(report.belowMinimum.length, "unit")} ran below their task's minimum tier; consider regenerating them with a stronger model.`);
   for (const r of report.replaced) out.push(`Replaced .sift/${r}.sift, which could not be read.`);
-  out.push(...keptNotes(report));
+  out.push(...structuralNotes(report));
   return out.join("\n");
 }
 
-function keptNotes(report: GenerateReport): string[] {
+/** Renames, moves, deletions, and renames that were not guessed: changes made without the AI. */
+function structuralNotes(r: Pick<GenerateReport, "renamed" | "deleted" | "movedFiles" | "ambiguous">): string[] {
   const out: string[] = [];
-  const changed = report.kept.filter((k) => k.changed);
-  if (report.kept.length > 0) {
-    out.push(`Kept ${report.kept.length} unit${report.kept.length === 1 ? "" : "s"} that already have descriptions (--force describes them again).`);
-  }
-  if (changed.length > 0) {
-    out.push(`${changed.length} of them changed since they were described; updating them arrives with "sift status" and sync (milestone 7):`);
-    for (const c of changed) out.push(`  changed: ${c.unit}`);
-  }
-  if (report.orphaned.length > 0) {
-    out.push(`${report.orphaned.length} described unit(s) no longer exist in the source and were left in place for sync (milestone 7):`);
-    for (const o of report.orphaned) out.push(`  gone: ${o}`);
-  }
+  for (const m of r.movedFiles) out.push(`  file moved: ${m.from} → ${m.to}`);
+  for (const m of r.renamed) out.push(`  ${renameLabel(m)}: ${m.from} → ${m.to}`);
+  for (const d of r.deleted) out.push(`  deleted: ${d}`);
+  for (const a of r.ambiguous) out.push(`  not matched: ${a.previous} looks like several new units (${a.candidates.join(", ")}); treated as deleted and new`);
   return out;
+}
+
+function renameLabel(m: { change: string; similarity?: number }): string {
+  if (m.change === "moved") return "moved";
+  if (m.change === "probable-rename") return `probably renamed (${Math.round((m.similarity ?? 0) * 100)}% similar)`;
+  return "renamed";
+}
+
+export function renderStatus(r: StatusReport, inSync: boolean): string {
+  const out: string[] = [];
+  const list = (title: string, items: string[], hint?: string) => {
+    if (items.length === 0) return;
+    out.push(`${title} (${items.length})${hint ? ` — ${hint}` : ""}:`);
+    for (const i of items) out.push(`  ${i}`);
+  };
+  const pureChanged = r.changed.filter((c) => !r.renamed.some((m) => m.to === c));
+  list("Changed since described", pureChanged, "generate updates them");
+  list("Not described yet", r.new, "generate describes them");
+  list("Deleted from the source", r.deleted, "generate removes them");
+  if (r.renamed.length > 0) {
+    out.push(`Renamed or moved (${r.renamed.length}) — generate keeps their IDs:`);
+    for (const m of r.renamed) out.push(`  ${renameLabel(m)}: ${m.from} → ${m.to}`);
+  }
+  if (r.movedFiles.length > 0) {
+    out.push(`Files moved (${r.movedFiles.length}) — generate moves their .sift files:`);
+    for (const m of r.movedFiles) out.push(`  ${m.from} → ${m.to}`);
+  }
+  list("Callee summaries changed", r.contextChanged, "generate checks their wording");
+  list("Marked stale", r.stale, "incomplete or needs review; generate --force describes them again");
+  list("Unreadable .sift files", r.unreadable.map((u) => `.sift/${u}.sift`), "generate replaces them");
+  for (const a of r.ambiguous) out.push(`Not matched: ${a.previous} looks like several new units (${a.candidates.join(", ")}).`);
+  if (r.belowTier.length > 0) out.push(`${plural(r.belowTier.length, "unit")} described below the recommended model tier.`);
+  const c = r.counts;
+  out.push(
+    "",
+    inSync ? `In sync: ${plural(c.units, "described unit")} match the code.` : 'Out of sync: run "sift generate" to update the descriptions.',
+    `${c.verified} verified, ${c.userEdited} edited by a person, ${c.generated} generated and not yet verified.`,
+  );
+  return out.join("\n");
 }
 
 export function renderModels(provider: string, routes: Route[], local: boolean): string {

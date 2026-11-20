@@ -106,6 +106,10 @@ async function extract(
     try {
       for (const f of needed) {
         const extraction = project.extractFile(f);
+        // Keep the source of the version being replaced and of this one, for diffs and rename detection.
+        const previous = await cache.getLastExtraction(f);
+        if (previous && previous.fileHash !== extraction.fileHash) await cache.putUnitSources(previous.units);
+        await cache.putUnitSources(extraction.units);
         await cache.putExtraction(extraction, adapter.id);
         results.push(extraction);
       }

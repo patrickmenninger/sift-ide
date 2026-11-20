@@ -15,6 +15,8 @@ export interface DescribeResponse {
 }
 
 export interface ResponseStep {
+  /** Update responses only: the ID of the previous step this one keeps, or absent for a new step. */
+  id?: string;
   kind: StepKind | null;
   text: string;
   covers: string[];
@@ -77,6 +79,56 @@ export const DESCRIBE_LITE_SCHEMA = {
   additionalProperties: false,
 } as const;
 
+/** The update prompt's output (design §7.4): the describe output, with each step's previous `id` or null. */
+export const UPDATE_SCHEMA = {
+  ...DESCRIBE_SCHEMA,
+  $defs: {
+    step: {
+      ...STEP_SCHEMA,
+      properties: { id: { type: ["string", "null"] }, ...STEP_SCHEMA.properties },
+      required: ["id", ...STEP_SCHEMA.required],
+    },
+  },
+} as const;
+
+/** The context-check output (design §7.3): only the wording that has to change. */
+export interface ContextCheckResponse {
+  summary: string | null;
+  steps: { id: string; text: string }[];
+}
+
+export const CONTEXT_CHECK_SCHEMA = {
+  type: "object",
+  properties: {
+    summary: { type: ["string", "null"] },
+    steps: {
+      type: "array",
+      items: { type: "object", properties: { id: { type: "string" }, text: { type: "string" } }, required: ["id", "text"], additionalProperties: false },
+    },
+  },
+  required: ["summary", "steps"],
+  additionalProperties: false,
+} as const;
+
+/** Check a context-check response against the unit's step IDs. */
+export function validateContextCheckResponse(json: unknown, stepIds: ReadonlySet<string>): { response: ContextCheckResponse | null; problems: string[] } {
+  const problems: string[] = [];
+  if (!isRecord(json)) return { response: null, problems: ["The response must be a single JSON object."] };
+  for (const key of Object.keys(json)) if (key !== "summary" && key !== "steps") problems.push(`Unexpected field "${key}"; allowed fields are summary, steps.`);
+  let summary: string | null = null;
+  if (json.summary !== null && json.summary !== undefined) summary = text(json.summary, "summary", problems);
+  const seen = new Set<string>();
+  const steps = list(json.steps ?? [], "steps", problems).map((v, i) => {
+    const r = isRecord(v) ? v : {};
+    const id = typeof r.id === "string" ? r.id : "";
+    if (!stepIds.has(id)) problems.push(`steps[${i}].id "${id}" is not a step of this unit.`);
+    else if (seen.has(id)) problems.push(`steps[${i}].id "${id}" is listed twice.`);
+    seen.add(id);
+    return { id, text: text(r.text, `steps[${i}].text`, problems) };
+  });
+  return problems.length > 0 ? { response: null, problems } : { response: { summary, steps }, problems };
+}
+
 export interface ValidationResult {
   /** Parsed and normalized response, when its shape is usable. */
   response: DescribeResponse | null;
@@ -90,10 +142,30 @@ export interface ValidationResult {
  * Check a describe or describe-lite response against the unit (design §8): shape, input names,
  * returns, valid keys, coverage, and that control-flow steps cover control flow.
  */
-export function validateDescribeResponse(json: unknown, unit: ExtractedUnit, lite: boolean): ValidationResult {
+export function validateDescribeResponse(
+  json: unknown,
+  unit: ExtractedUnit,
+  lite: boolean,
+  /** For update responses: the previous description's step IDs, which steps may keep. */
+  previousStepIds?: ReadonlySet<string>,
+): ValidationResult {
   const problems: string[] = [];
-  const response = parseShape(json, lite, problems);
+  const response = parseShape(json, lite, problems, previousStepIds !== undefined);
   if (!response) return { response: null, problems, uncovered: [] };
+  if (previousStepIds) {
+    const seen = new Set<string>();
+    const check = (steps: ResponseStep[], path: string) =>
+      steps.forEach((s, i) => {
+        const at = `${path}[${i}]`;
+        if (s.id !== undefined) {
+          if (!previousStepIds.has(s.id)) problems.push(`${at}.id "${s.id}" is not a step of the previous description; use null for a new step.`);
+          else if (seen.has(s.id)) problems.push(`${at}.id "${s.id}" is used twice; a previous step can be kept only once.`);
+          seen.add(s.id);
+        }
+        check(s.steps, `${at}.steps`);
+      });
+    check(response.steps, "steps");
+  }
 
   response.inputs = foldDestructured(unit.inputs.map((i) => i.name), response.inputs);
   const expected = unit.inputs.map((i) => normalizeName(i.name));
@@ -191,7 +263,7 @@ export function parentKey(key: string): string | null {
   return dot < 0 ? null : key.slice(0, dot);
 }
 
-function parseShape(json: unknown, lite: boolean, problems: string[]): DescribeResponse | null {
+function parseShape(json: unknown, lite: boolean, problems: string[], withIds = false): DescribeResponse | null {
   if (!isRecord(json)) {
     problems.push("The response must be a single JSON object.");
     return null;
@@ -211,7 +283,7 @@ function parseShape(json: unknown, lite: boolean, problems: string[]): DescribeR
     if (isRecord(json.returns)) returns = { meaning: text(json.returns.meaning, "returns.meaning", problems) };
     else problems.push('"returns" must be an object with "meaning", or null.');
   }
-  const steps = lite ? [] : list(json.steps, "steps", problems).map((s, i) => parseStep(s, `steps[${i}]`, problems));
+  const steps = lite ? [] : list(json.steps, "steps", problems).map((s, i) => parseStep(s, `steps[${i}]`, problems, withIds));
   const warnings = list(json.warnings, "warnings", problems).map((v, i) => {
     const r = isRecord(v) ? v : {};
     if (!isRecord(v)) problems.push(`warnings[${i}] must be an object.`);
@@ -223,7 +295,7 @@ function parseShape(json: unknown, lite: boolean, problems: string[]): DescribeR
   return problems.length > before ? null : { summary, inputs, returns, steps, warnings };
 }
 
-function parseStep(value: unknown, at: string, problems: string[]): ResponseStep {
+function parseStep(value: unknown, at: string, problems: string[], withIds: boolean): ResponseStep {
   if (!isRecord(value)) {
     problems.push(`${at} must be an object with "kind", "text", "covers", and "steps".`);
     return { kind: null, text: "", covers: [], steps: [] };
@@ -233,12 +305,17 @@ function parseStep(value: unknown, at: string, problems: string[]): ResponseStep
     if ((STEP_KINDS as readonly unknown[]).includes(value.kind)) kind = value.kind as StepKind;
     else problems.push(`${at}.kind must be null or one of ${STEP_KINDS.join(", ")}.`);
   }
-  return {
+  const step: ResponseStep = {
     kind,
     text: text(value.text, `${at}.text`, problems),
     covers: stringList(value.covers, `${at}.covers`, problems),
-    steps: list(value.steps ?? [], `${at}.steps`, problems).map((s, i) => parseStep(s, `${at}.steps[${i}]`, problems)),
+    steps: list(value.steps ?? [], `${at}.steps`, problems).map((s, i) => parseStep(s, `${at}.steps[${i}]`, problems, withIds)),
   };
+  if (withIds && value.id !== null && value.id !== undefined) {
+    if (typeof value.id === "string") step.id = value.id;
+    else problems.push(`${at}.id must be a previous step ID or null.`);
+  }
+  return step;
 }
 
 function text(value: unknown, at: string, problems: string[]): string {
@@ -281,29 +358,24 @@ export interface DeriveOptions {
   calleeEffects(call: CallSite): Effect[];
   generatedBy: GeneratedBy;
   contextHash?: string;
+  /** The previous description's warnings, whose IDs are kept when kind and text are unchanged. */
+  previousWarnings?: SiftWarning[];
 }
 
+type FactSources = Pick<DeriveOptions, "nodeEffects" | "callRefs" | "calleeEffects">;
+
 /**
- * Build the `.sift` unit: prose from the model, everything else from the code. Each structure node
- * belongs to the deepest step covering it or its nearest covered ancestor; a step's `calls` and
- * `effects` come from the nodes it owns, never from the model.
+ * Fill each step's `calls` and `effects` from the code it owns, and return the unit's effects. Each
+ * structure node belongs to the deepest step covering it or its nearest covered ancestor.
  */
-export function deriveSiftUnit(o: DeriveOptions): SiftUnit {
-  const stepIds = new Set<string>();
+function fillFacts(steps: SiftStep[], unit: ExtractedUnit, o: FactSources): { effects: Effect[]; ownerOf: (key: string) => SiftStep | undefined } {
   const owner = new Map<string, SiftStep>();
-
-  const build = (steps: ResponseStep[]): SiftStep[] =>
-    steps.map((s) => {
-      const id = newId("step", stepIds);
-      stepIds.add(id);
-      const step: SiftStep = { id, text: s.text, covers: s.covers, calls: [], effects: [], steps: [] };
-      if (s.kind) step.kind = s.kind;
-      for (const key of s.covers) owner.set(key, step); // nested steps are built after, so deeper steps win
-      step.steps = build(s.steps);
-      return step;
+  const index = (list: SiftStep[]): void =>
+    list.forEach((s) => {
+      for (const key of s.covers) owner.set(key, s); // nested steps are indexed after, so deeper steps win
+      index(s.steps);
     });
-  const steps = o.lite ? [] : build(o.response.steps);
-
+  index(steps);
   const ownerOf = (key: string): SiftStep | undefined => {
     for (let k: string | null = key; k !== null; k = parentKey(k)) {
       const s = owner.get(k);
@@ -312,6 +384,8 @@ export function deriveSiftUnit(o: DeriveOptions): SiftUnit {
     return undefined;
   };
 
+  const clear = (list: SiftStep[]): void => list.forEach((s) => ((s.calls = []), (s.effects = []), clear(s.steps)));
+  clear(steps);
   const unitEffects = new Set<Effect>();
   const stepEffects = new Map<SiftStep, Set<Effect>>();
   const visit = (node: StructureNode) => {
@@ -331,12 +405,62 @@ export function deriveSiftUnit(o: DeriveOptions): SiftUnit {
     }
     node.children.forEach(visit);
   };
-  o.unit.body.forEach(visit);
+  unit.body.forEach(visit);
   for (const [step, set] of stepEffects) step.effects = sortEffects(set);
+  return { effects: sortEffects(unitEffects), ownerOf };
+}
 
-  const warningIds = new Set<string>();
+/**
+ * Recompute the facts of a unit whose code has not changed (design §6.2): calls and effects come
+ * from the code, so they follow renamed callees, changed rule packs, and callees' new effects
+ * without asking the AI. Prose, IDs, and status are kept. Returns a new unit; the input is not changed.
+ */
+export function rederiveFacts(previous: SiftUnit, unit: ExtractedUnit, o: FactSources): SiftUnit {
+  const copy: SiftUnit = structuredClone(previous);
+  const { effects } = fillFacts(copy.steps, unit, o);
+  copy.effects = effects;
+  copy.symbol = unit.symbol;
+  copy.kind = unit.kind;
+  copy.bodyHash = unit.bodyHash;
+  copy.inputs = unit.inputs.map((i, k) => {
+    const meaning = previous.inputs.find((p) => normalizeName(p.name) === normalizeName(i.name))?.meaning ?? previous.inputs[k]?.meaning ?? "";
+    return { name: i.name, type: i.type, ...(i.typeInferred ? { typeInferred: true } : {}), meaning };
+  });
+  if (unit.returns && previous.returns) {
+    copy.returns = { type: unit.returns.type, ...(unit.returns.typeInferred ? { typeInferred: true } : {}), meaning: previous.returns.meaning };
+  } else delete copy.returns;
+  return copy;
+}
+
+/**
+ * Build the `.sift` unit: prose from the model, everything else from the code. Each structure node
+ * belongs to the deepest step covering it or its nearest covered ancestor; a step's `calls` and
+ * `effects` come from the nodes it owns, never from the model.
+ */
+export function deriveSiftUnit(o: DeriveOptions): SiftUnit {
+  // Kept step IDs (update responses) are reserved first, so new IDs never collide with them.
+  const stepIds = new Set<string>();
+  const reserve = (steps: ResponseStep[]): void => steps.forEach((s) => (s.id && stepIds.add(s.id), reserve(s.steps)));
+  reserve(o.response.steps);
+  const build = (steps: ResponseStep[]): SiftStep[] =>
+    steps.map((s) => {
+      const id = s.id ?? newId("step", stepIds);
+      stepIds.add(id);
+      const step: SiftStep = { id, text: s.text, covers: s.covers, calls: [], effects: [], steps: [] };
+      if (s.kind) step.kind = s.kind;
+      step.steps = build(s.steps);
+      return step;
+    });
+  const steps = o.lite ? [] : build(o.response.steps);
+  const { effects, ownerOf } = fillFacts(steps, o.unit, o);
+
+  // A warning with the same kind and text as a previous one keeps its ID.
+  const previous = new Map((o.previousWarnings ?? []).map((w) => [`${w.kind}\n${w.text}`, w.id]));
+  const warningIds = new Set<string>(previous.values());
   const warnings: SiftWarning[] = o.response.warnings.map((w) => {
-    const id = newId("warning", warningIds);
+    const kept = previous.get(`${w.kind}\n${w.text}`);
+    if (kept) previous.delete(`${w.kind}\n${w.text}`);
+    const id = kept ?? newId("warning", warningIds);
     warningIds.add(id);
     const refs: string[] = [];
     for (const key of w.covers) {
@@ -356,7 +480,7 @@ export function deriveSiftUnit(o: DeriveOptions): SiftUnit {
     generatedBy: o.generatedBy,
     summary: o.response.summary,
     inputs: o.unit.inputs.map((i) => ({ name: i.name, type: i.type, ...(i.typeInferred ? { typeInferred: true } : {}), meaning: meaning.get(normalizeName(i.name)) ?? "" })),
-    effects: sortEffects(unitEffects),
+    effects,
     steps,
     warnings,
     tests: [],

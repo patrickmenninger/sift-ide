@@ -1,6 +1,6 @@
 import type { ExtractedUnit, StructureNode } from "./adapter.js";
 import { redactSecrets } from "./redact.js";
-import type { Effect } from "./schema.js";
+import type { Effect, SiftStep, SiftUnit } from "./schema.js";
 
 /**
  * The user-prompt half of a describe request (design §7.4): the unit's code with structure-key
@@ -31,6 +31,14 @@ export interface DescribeInput {
   lite: boolean;
   nodeEffects: Map<string, Effect[]>;
   callees: CalleeInfo[];
+  /** For a changed unit (design §7.4): the previous description and the code changes since. */
+  previous?: PreviousDescription;
+}
+
+export interface PreviousDescription {
+  unit: SiftUnit;
+  /** `lineDiff` of the old and new unit source, or null when the old source is no longer known. */
+  diff: string | null;
 }
 
 export interface RenderedInput {
@@ -66,7 +74,52 @@ export function renderDescribeInput(input: DescribeInput): RenderedInput {
   if (input.callees.length === 0) lines.push("- (none)");
   for (const c of input.callees) lines.push(...renderCallee(c, input.lite));
 
-  return { prompt: lines.join("\n"), redactions: code.count + (doc?.count ?? 0) };
+  let redactions = code.count + (doc?.count ?? 0);
+  if (input.previous) {
+    const { unit: prev, diff } = input.previous;
+    lines.push("", "Previous description (its `covers` keys refer to the previous version of the code):", "```json", previousJson(prev, input.lite), "```");
+    if (prev.status === "user-edited") lines.push("", "A person edited this description. Keep their wording wherever it is still accurate.");
+    if (diff !== null) {
+      const changes = redactSecrets(diff);
+      redactions += changes.count;
+      lines.push("", "Changes to the code since the previous description (`-` removed, `+` added):", "```text", changes.text, "```");
+    } else {
+      lines.push("", "The previous version of the code is not available; compare the previous description with the code above.");
+    }
+  }
+  return { prompt: lines.join("\n"), redactions };
+}
+
+/** The previous description in the shape the model returns, with step IDs. */
+function previousJson(unit: SiftUnit, lite: boolean): string {
+  const step = (s: SiftStep): object => ({ id: s.id, kind: s.kind ?? null, text: s.text, covers: s.covers, steps: s.steps.map(step) });
+  const covers = new Map<string, string[]>();
+  const index = (steps: SiftStep[]): void => steps.forEach((s) => (covers.set(s.id, s.covers), index(s.steps)));
+  index(unit.steps);
+  const data = {
+    summary: unit.summary,
+    inputs: unit.inputs.map((i) => ({ name: i.name, meaning: i.meaning })),
+    returns: unit.returns ? { meaning: unit.returns.meaning } : null,
+    ...(lite ? {} : { steps: unit.steps.map(step) }),
+    warnings: unit.warnings.map((w) => ({ kind: w.kind, text: w.text, ...(lite ? {} : { covers: w.steps.flatMap((id) => covers.get(id) ?? []) }) })),
+  };
+  return JSON.stringify(data, null, 1);
+}
+
+export interface ContextCheckInput {
+  file: string;
+  unit: SiftUnit;
+  /** Callees whose summary changed: name, the summary the description was written with (if known), and the new one. */
+  changes: { name: string; before?: string; after: string }[];
+}
+
+/** The user prompt for a context check (design §7.3): the description, and the callee summaries that changed. */
+export function renderContextCheckInput(input: ContextCheckInput): string {
+  const step = (s: SiftStep): object => ({ id: s.id, text: s.text, steps: s.steps.map(step) });
+  const description = { summary: input.unit.summary, ...(input.unit.lite ? {} : { steps: input.unit.steps.map(step) }) };
+  const lines = [`File: ${input.file}`, `Unit: ${input.unit.symbol} (${input.unit.kind})`, "", "Current description:", "```json", JSON.stringify(description, null, 1), "```", "", "Changed callees:"];
+  for (const c of input.changes) lines.push(`- \`${c.name}\``, `  before: ${c.before ?? "(not known)"}`, `  now: ${c.after}`);
+  return lines.join("\n");
 }
 
 function renderCallee(c: CalleeInfo, lite: boolean): string[] {

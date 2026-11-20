@@ -505,8 +505,9 @@ The adapter marks a unit `isSmall` when it has no control flow, no callbacks, no
 - `files/<source path>.json` — per source file, the last `FileExtraction` (ranges, structure, call sites), used only when its `fileHash` and adapter match.
 - `fingerprints.json` — size, mtime, and hash per source file (§5.1).
 - `graph.json` — the code graph (§10).
+- `units/<bodyHash>.json` — the source of each version of a unit Sift has extracted (content-addressed, never rewritten). Sync uses it to show the update prompt a diff and to score probable renames (§7.2). `generate` prunes entries no `.sift` unit refers to.
 
-It is purely a speed-up: deleting it never loses information, because everything in it can be recomputed from source.
+It is purely a speed-up: deleting it never loses information about the code, because everything in it can be recomputed from source. Without `units/`, sync still works: changed units are updated without a diff, and renames that also changed the code are treated as delete + create.
 
 `.sift` files store only **outgoing** calls (in each step's `calls`). Callers are always computed from the graph and never written to a `.sift` file, so editing one file never changes the `.sift` file of another.
 
@@ -524,7 +525,8 @@ It is purely a speed-up: deleting it never loses information, because everything
 7. Describe     for each level, in parallel up to the concurrency limit:
                   new unit       → describe prompt
                   changed unit   → update prompt (§7.4)
-                  context changed→ update prompt, "callee summaries changed" only
+                  context changed→ context-check prompt (§7.3)
+                  unchanged unit → no AI; calls and effects recomputed from the code
 8. Validate     schema + structural checks (§8); one retry with errors; else mark unit `stale` and report
 9. Derive       fill calls, effects, ids; compute contextHash
 10. Write       atomic, formatting-preserving write of each changed .sift file
@@ -533,13 +535,17 @@ It is purely a speed-up: deleting it never loses information, because everything
 
 Units in the same strongly connected component (recursion) are described in the same round: each sees the others' signatures but not their summaries. (Describing a component in a single prompt is deferred until the evaluation shows it helps.)
 
-**Milestone 6 scope.** `generate` describes units that have no description yet. A unit whose symbol already has one is kept as it is, and reported if its code changed since; updating it is sync (milestone 7). `--force` describes kept units again, keeping their IDs. `.sift` units whose symbol no longer exists are left in place for sync. Details:
+Implemented in `core/generate.ts`, on top of the sync plan in `core/sync.ts` (steps 1–5, shared with `status` and `check`). Details:
 
-- **IDs up front.** Every new unit gets its ID before any prompt is sent, so a step can refer to a callee described later in the same run.
-- **Ordering.** Components are scheduled callees-first and run concurrently up to `concurrency`; a caller waits only for its own callees.
+- **IDs up front.** Every new unit gets its ID before any prompt is sent, so a step can refer to a callee described later in the same run. Renamed and moved units keep theirs.
+- **Ordering.** Every unit of the target files, including unchanged ones, is scheduled callees-first; components run concurrently up to `concurrency`, and a caller waits only for its own callees. An unchanged unit's turn costs nothing unless its callees' summaries changed, and because callers come after callees, a context check sees the final summaries and can cascade.
+- **Unchanged units** keep their prose, IDs, and status; their `calls` and `effects` are recomputed from the code, so they follow renamed callees, changed rule packs, and callees' new effects without the AI.
+- **Deleted units** are removed; a `.sift` file left with no units, or whose source is gone and did not move, is deleted (with any folders that leaves empty).
 - **fileHash.** A `.sift` file's `fileHash` is updated only when every unit in it matches the current source; otherwise it keeps the old value, so the fast "nothing changed" check never hides a stale unit.
-- **Failures** never block other units. A unit that fails is not written; the run exits with code 1.
-- `--dry-run` lists each unit with its task and model without calling the AI.
+- **Failures** never block other units. A unit that fails keeps its previous description (or is not written, if new); the run exits with code 1.
+- **Status after an update:** `generated`, or `stale` if coverage is incomplete. A `verified` unit becomes `generated`, since a person has not seen the new text. A `user-edited` unit stays `user-edited` if every piece of its wording the update kept is unchanged; otherwise it is written `stale` and reported for review.
+- `--force` describes every unit from scratch with the describe prompts, keeping IDs.
+- `--dry-run` lists each unit to describe or update with its task and model, the units that may get a context check, and the renames, moves, and deletions, without calling the AI.
 
 ### 7.2 Identity Matching
 
@@ -555,9 +561,30 @@ Ambiguous cases (several candidates above the threshold) are not guessed; they b
 
 **File moves:** a `.sift` file whose source no longer exists is matched to a new source file with the same `fileHash` (or ≥ 0.8 unit overlap). The `.sift` file is moved, and IDs are kept.
 
+Implementation notes (`core/sync.ts`):
+
+- `bodyHash` includes the signature, so a plain rename changes it; renames are found by rule 4. Rule 3 catches units whose qualified name changed without their code changing (a renamed class's methods).
+- Rule 4 needs the code the description was made from. It comes from the cache's unit sources (§6.5), looked up by the description's `bodyHash`; when it is not there, rule 4 does not apply. Similarity is the longest common token subsequence over total tokens, comments and whitespace removed, on the whole unit including its signature.
+- Rule 3 only pairs units whose code is unique on both sides; duplicate code is not guessed either.
+- **Units moved between files** keep their ID when exactly one deleted unit and one new unit, in different files, have the same `bodyHash`.
+- File moves are matched one-to-one only: two equally good targets, or two orphans for one target, are left as delete + create.
+
+### 7.2.1 `sift status` and `sift check`
+
+Both run the sync plan without the AI and list: units changed since described (including probable renames), not described yet, deleted, renamed or moved, files moved, units whose callees' summaries changed since they were described (their stored `contextHash` differs from one computed from the current `.sift` summaries), units marked `stale`, unreadable `.sift` files, and ambiguous renames. A summary line counts verified, person-edited, and unverified units, and units described below their recommended tier are counted.
+
+`check` exits 1 when any of the lists is non-empty, so a CI job or a pre-commit hook fails when descriptions are out of date. It hashes every file when the `CI` environment variable is set (§5.1). Units below their recommended tier, and unverified units, do not fail `check`.
+
 ### 7.3 Context Invalidation
 
 When a unit's `summary` changes, each caller's `contextHash` changes. Callers are then sent a cheap update prompt that only asks: "Given these updated callee summaries, does any step need rewording?" Most answer "no change". This stops staleness from cascading silently without regenerating everything.
+
+Implementation:
+
+- `contextHash` covers the summaries of the project units a unit calls, plus the described implementations for calls to an interface member. Callees in the same recursion cycle are left out, so describing a cycle concurrently always gives the same hash.
+- An unchanged unit gets a **context check** (`prompts/context-check.md`, task `context-check`, small tier) when its expected `contextHash` differs from the stored one. The prompt holds the current summary and steps with IDs, and each changed callee's summary before and after. When the summaries changed before this run (for example, edited by hand) and the old ones are unknown, every callee's summary is shown as it is now.
+- The reply is `{ "summary": string | null, "steps": [{ "id", "text" }] }`: only the wording that must change. Code, IDs, calls, and effects are untouched. If the summary changes, the unit's own callers are checked in turn.
+- A reworded `verified` unit becomes `generated`; a reworded `user-edited` unit is written `stale` and reported for review, as for updates (§7.1).
 
 ### 7.4 Prompts
 
@@ -592,6 +619,12 @@ Output:
 
 Steps with `status: user-edited` are flagged in the prompt so their wording is preserved unless it has become wrong; if it has, the unit is marked for review rather than silently rewritten.
 
+Implemented as `prompts/update.md` (task `update`, frontier tier), a self-contained prompt with the description rules in short form, the update rules, and two short examples. The user prompt is the describe input plus the previous description as JSON (steps with IDs and `covers`, which refer to the old code's keys) and the diff: the whole new unit, line by line, with removed lines marked `-` and added lines `+` (`core/text-diff.ts`; indentation-only changes are not shown as changes). The diff also passes through secret filtering. Without the old source (§6.5), the prompt says so and the model compares the description with the code. `user-edited` status is unit-level in schema v0, so the whole unit's wording is treated as the person's.
+
+Validation adds: a step's `id` must be a step of the previous description, used once (§8). Derivation keeps those IDs, gives new steps fresh ones, and keeps the ID of every warning whose kind and text are unchanged.
+
+Changed **lite** units use `describe-lite` (version 2) with the previous description added; the prompt keeps its wording where still accurate. A unit that changes between lite and full uses the update prompt (or describe-lite) the same way.
+
 ### 7.5 Prompt Portability
 
 Prompts are written to work across model tiers and, later, other vendors (requirements §8.3):
@@ -618,6 +651,8 @@ Run after every AI response, before anything is written:
 | Inputs complete | `inputs` names match the signature exactly (whitespace ignored, for destructuring patterns such as `{ a, b }`). A destructured parameter described as one input per element, in order, is folded into that parameter instead of retried. | Retry once. |
 | Returns | `returns` is present when the unit returns something other than `void`. | Retry once. |
 | Warnings | Warning kinds are kebab-case and their `covers` keys exist. | Retry once. |
+| Step IDs (update) | Each `id` is a step of the previous description, used at most once; `null` marks a new step. | Retry once. |
+| Context check | Each `id` is a step of the unit, listed once; texts are non-empty. | Retry once. |
 
 Implemented in `core/describe-output.ts`. Problems are phrased as instructions the model can act on (`steps[0] covers "9", which is not a structure key of this unit.`). Coverage reports only the outermost uncovered keys. Retries include the exact problems in the prompt. After the retry, a response whose only problem is coverage is written with `status: stale`; any other problem means the unit is not written. Failures never block other units.
 
@@ -762,7 +797,7 @@ Every read-only command first runs the freshness fast path (§5.1) and then refr
 2. Unchanged files with an edge into a changed or dropped file are rebuilt too, because the type checker may now resolve their calls differently (for example, the method they called was renamed). Their extraction cache is bypassed.
 3. Extractions come from the cache (§6.5) when the hash matches. The adapter's project, the slow part, is opened only when something must actually be re-extracted, and then once for all files.
 
-After a rename, a caller's call no longer resolves and shows up as a gap, which `sift status` (milestone 7) will report. An incremental refresh produces the same graph as a full rebuild in these cases, and a test checks this.
+After a rename, a caller's call no longer resolves and shows up as a gap (listed by `sift callees`); until the caller is edited to match, the code does not compile, and once it is, the caller shows as changed in `sift status`. An incremental refresh produces the same graph as a full rebuild in these cases, and a test checks this.
 
 Known limit: an unchanged file whose call was *unresolved* is not rebuilt when a new file makes that call resolvable. Deleting the cache, or any change to that file, fixes it.
 
@@ -808,9 +843,9 @@ Before any prompt is sent:
 | Command | Does | AI calls |
 |---|---|---|
 | `sift init` | Creates `.sift/`, `sift.config.yaml`, adds `.sift/.cache/` and `.sift/models.local.yaml` to `.gitignore`. | No |
-| `sift generate [paths…]` | Runs the pipeline (§7) for the given files or folders, or the whole project. `--dry-run` lists units and models without calling the AI; `--force` describes units again, keeping IDs; `--json` prints the run report. Exits 1 if any unit failed. | Yes |
-| `sift status` | Lists stale, new, deleted, unverified, and failed-validation units. | No |
-| `sift check` | Like `status`, but exits non-zero if anything is stale or missing. For CI and hooks. | No |
+| `sift generate [paths…]` | Runs the pipeline (§7) for the given files or folders, or the whole project: describes new units, updates changed ones, follows renames and moves, removes deleted units, and re-checks callers whose callees' summaries changed. `--dry-run` lists the work and models without calling the AI; `--force` describes every unit again from scratch, keeping IDs; `--json` prints the run report. Exits 1 if any unit failed. | Yes |
+| `sift status` | Lists units whose description is out of date: changed, new, deleted, renamed or moved, files moved, callees' summaries changed, marked stale, and unreadable files; counts verified and unverified units (§7.2.1). | No |
+| `sift check` | Like `status`, but exits 1 if any description is out of date. Hashes every file when `CI` is set. For CI and hooks. | No |
 | `sift show <symbol\|file>` | Prints a readable rendering of a unit (nested outline, warnings). | No |
 | `sift callers <symbol> [-d N]` | Units and routes that call it, with edge confidence, as a tree. | No |
 | `sift callees <symbol> [-d N]` | Units and library calls it makes, with effects (propagated one level), and its unresolved calls. | No |
