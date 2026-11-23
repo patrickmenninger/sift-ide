@@ -10,13 +10,15 @@
     "node": ">=20.12"
   },
   "scripts": {
-    "build": "tsc -b",
+    "build": "tsc -b && npm run build -w sift-vscode",
     "clean": "tsc -b --clean",
     "typecheck": "tsc -p tsconfig.test.json",
     "test": "vitest run",
     "verify": "npm run build && npm run typecheck && npm test",
     "test:watch": "vitest",
-    "sift": "node packages/cli/dist/main.js"
+    "sift": "node packages/cli/dist/main.js",
+    "test:vscode": "npm run test:integration -w sift-vscode",
+    "package:vscode": "npm run package -w sift-vscode"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

@@ -375,7 +375,7 @@ export class Workspace {
   }
 
   /** Run the generation pipeline (design §7.1). */
-  generate(options: { paths?: string[]; force?: boolean; dryRun?: boolean; fullHash?: boolean; onEvent?: (e: GenerateEvent) => void } = {}): Promise<GenerateReport> {
+  generate(options: { paths?: string[]; force?: boolean; dryRun?: boolean; fullHash?: boolean; onEvent?: (e: GenerateEvent) => void; signal?: AbortSignal } = {}): Promise<GenerateReport> {
     return this.serial(async () => {
       const provider = this.provider;
       if (!provider) throw new SiftError("PROVIDER_FAILED", "This workspace was opened without an AI provider, so it cannot generate descriptions.");
@@ -392,6 +392,7 @@ export class Workspace {
         dryRun: options.dryRun === true,
         fullHash: options.fullHash ?? this.options.fullHash ?? process.env.SIFT_FULL_HASH === "1",
         ...(options.onEvent ? { onEvent: options.onEvent } : {}),
+        ...(options.signal ? { signal: options.signal } : {}),
       });
       this.graphValue = null;
       const files = [...report.written, ...report.removed.map(siftPathFor)];

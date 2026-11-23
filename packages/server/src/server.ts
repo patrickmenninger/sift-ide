@@ -1,8 +1,8 @@
-import { createMessageConnection, ResponseError, StreamMessageReader, StreamMessageWriter, type MessageConnection } from "vscode-jsonrpc/node";
+import { createMessageConnection, ResponseError, StreamMessageReader, StreamMessageWriter, type CancellationToken, type MessageConnection } from "vscode-jsonrpc/node";
 import { SiftError, type Workspace } from "@sift/core";
 import { PROTOCOL_VERSION, SIFT_ERROR, type Notifications, type RequestMethod, type Requests, type SiftErrorData } from "./protocol.js";
 
-type Handlers = { [M in RequestMethod]: (params: Requests[M]["params"]) => Promise<Requests[M]["result"]> };
+type Handlers = { [M in RequestMethod]: (params: Requests[M]["params"], token: CancellationToken) => Promise<Requests[M]["result"]> };
 
 export interface ServeOptions {
   workspace: Workspace;
@@ -28,7 +28,8 @@ export function serve(options: ServeOptions): { connection: MessageConnection; c
         throw new SiftError("NOT_IMPLEMENTED", `This Sift server speaks protocol ${PROTOCOL_VERSION}, but the client speaks ${protocolVersion}. Update the extension or Sift so they match.`);
       }
       initialized = true;
-      return { protocolVersion: PROTOCOL_VERSION, root: workspace.root, serverVersion: options.serverVersion };
+      const provider = workspace.provider ? { id: workspace.provider.id, local: workspace.provider.capabilities.local } : null;
+      return { protocolVersion: PROTOCOL_VERSION, root: workspace.root, serverVersion: options.serverVersion, provider };
     },
     "sift/refresh": async ({ fullHash }) => {
       const r = await workspace.refresh(fullHash === undefined ? {} : { fullHash });
@@ -46,16 +47,28 @@ export function serve(options: ServeOptions): { connection: MessageConnection; c
     "sift/sourceRanges": ({ unit, step }) => workspace.sourceRanges(unit, step),
     "sift/stepAt": ({ source, position }) => workspace.stepAt(source, position),
     "sift/stepTargets": ({ unit, step }) => workspace.stepTargets(unit, step),
-    "sift/generate": ({ token, ...rest }) =>
-      workspace.generate({ ...rest, ...(token !== undefined ? { onEvent: (event) => notify("sift/generateProgress", { token, event }) } : {}) }),
+    // Cancelling the request ($/cancelRequest) stops the run; the report then says `cancelled`.
+    "sift/generate": async ({ token, ...rest }, cancel) => {
+      const controller = new AbortController();
+      const subscription = cancel.onCancellationRequested(() => controller.abort());
+      try {
+        return await workspace.generate({
+          ...rest,
+          signal: controller.signal,
+          ...(token !== undefined ? { onEvent: (event) => notify("sift/generateProgress", { token, event }) } : {}),
+        });
+      } finally {
+        subscription.dispose();
+      }
+    },
     "sift/verify": ({ targets }) => workspace.verify(targets),
   };
 
-  for (const [method, handler] of Object.entries(handlers) as [RequestMethod, (p: unknown) => Promise<unknown>][]) {
-    connection.onRequest(method, async (params: unknown) => {
+  for (const [method, handler] of Object.entries(handlers) as [RequestMethod, (p: unknown, token: CancellationToken) => Promise<unknown>][]) {
+    connection.onRequest(method, async (params: unknown, token: CancellationToken) => {
       if (!initialized && method !== "sift/initialize") throw new ResponseError(SIFT_ERROR, 'Call "sift/initialize" first.', { code: "NOT_IMPLEMENTED", details: [] } satisfies SiftErrorData);
       try {
-        return await handler(params ?? {});
+        return await handler(params ?? {}, token);
       } catch (err) {
         throw toResponseError(err);
       }

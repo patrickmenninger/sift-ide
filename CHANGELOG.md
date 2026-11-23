@@ -13,9 +13,13 @@ All notable changes to Sift are recorded here. Versions follow the roadmap phase
 - **`sift serve`** and `@sift/server`: the workspace over JSON-RPC on stdio, with a typed client, for the VS Code extension.
 - **`sift mcp`** and `@sift/mcp`: an MCP server for AI coding agents with `sift_describe`, `sift_find`, `sift_callers`, `sift_callees`, `sift_impact`, `sift_flow`, and `sift_status`, plus `sift://file/<path>` resources. Read-only; stale descriptions are always marked; lists are capped at 50 items. `--allow-generate` adds `sift_generate`.
 
+- **VS Code extension** (`packages/vscode`, built as a `.vsix` with `npm run package:vscode`): runs the bundled engine (`sift serve`) for each folder with a `sift.config.yaml`, restarting it after a crash; a status bar count and explorer dots for out-of-date or missing logic; Out of Date, Callers, and Callees views; Describe This File / Folder and Update Out-of-Date Descriptions, each with an estimate first and cancellable; `sift.updateOnSave: ask`; Sift: Initialize.
+- Cancelling a generate run: `sift/generate` stops on `$/cancelRequest` (core takes an `AbortSignal`). Units already described are written and the report says `cancelled`.
+
 ### Changed
 
 - Every CLI command runs through the workspace.
+- `sift/initialize` also reports the project's AI provider and whether it keeps code on the machine.
 
 ## 0.1.0 — Phase 1: Derivation Engine
 

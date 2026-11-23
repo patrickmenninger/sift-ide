@@ -170,7 +170,27 @@ Every tool only reads; none changes your code. Results reflect the files on disk
 
 ## Editors
 
-`sift serve` runs Sift's engine as a JSON-RPC server on stdin and stdout. The VS Code extension (in progress) starts it for you; the protocol is defined in `packages/server/src/protocol.ts`.
+### VS Code
+
+The extension in `packages/vscode` is not on the marketplace yet. Build it and install the `.vsix`:
+
+```sh
+npm run package:vscode
+code --install-extension packages/vscode/sift.vsix
+```
+
+It starts Sift for each workspace folder with a `sift.config.yaml` (no `sift` on your PATH needed: the engine is bundled) and shows:
+
+- the number of out-of-date or missing descriptions in the status bar, and a dot in the explorer on files whose logic is out of date or not described yet;
+- an **Out of Date** list in the Sift sidebar, grouped by reason;
+- **Callers** and **Callees** of the function at the cursor (editor context menu), with how each call was resolved and the calls Sift could not resolve;
+- **Sift: Describe This File** (editor title button), **Describe Folder** (explorer), and **Update Out-of-Date Descriptions**. Each first shows what will be sent to which models and asks; a running update can be cancelled, and the units already described are kept.
+
+`sift.updateOnSave: ask` offers an update after you save a file whose logic is now out of date. Sift never calls the AI without asking.
+
+### Other editors
+
+`sift serve` runs Sift's engine as a JSON-RPC server on stdin and stdout; the protocol is defined in `packages/server/src/protocol.ts`.
 
 ## Configuration
 
@@ -229,8 +249,10 @@ Requires Node.js 20.12 or later.
 
 ```sh
 npm install
-npm run verify      # build, type-check (including tests), run tests
+npm run verify      # build (packages and the extension bundle), type-check (including tests), run tests
 npm run sift -- --help
+npm run test:vscode # extension integration tests in a downloaded VS Code (opens a window)
+npm run package:vscode
 ```
 
 | Package | Purpose |
@@ -240,6 +262,8 @@ npm run sift -- --help
 | `packages/provider-claude-code` | AI provider using `claude -p` |
 | `packages/rules` | Built-in framework rule packs |
 | `packages/server` | `sift serve`: the workspace over JSON-RPC, with a typed client for editors |
+| `packages/mcp-server` | `sift mcp`: descriptions and the code graph as MCP tools for AI coding agents |
+| `packages/vscode` | The VS Code extension: bundles the engine and runs `sift serve` per workspace folder |
 | `packages/cli` | The `sift` command |
 | `eval/harness` | Evaluation harness behind `sift eval` |
 

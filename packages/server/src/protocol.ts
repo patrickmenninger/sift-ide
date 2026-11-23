@@ -28,7 +28,11 @@ export const PROTOCOL_VERSION = 1;
 
 /** Method name → params and result. */
 export interface Requests {
-  "sift/initialize": { params: { protocolVersion: number }; result: { protocolVersion: number; root: string; serverVersion: string } };
+  /** `provider` is the project's AI provider (null when the server runs without one). */
+  "sift/initialize": {
+    params: { protocolVersion: number };
+    result: { protocolVersion: number; root: string; serverVersion: string; provider: { id: string; local: boolean } | null };
+  };
   "sift/refresh": { params: { fullHash?: boolean }; result: { rebuilt: string[]; removed: string[] } };
   "sift/logicFile": { params: { source: string }; result: LogicFile };
   "sift/unit": { params: { query: string }; result: { source: string; unit: SiftUnit } };
