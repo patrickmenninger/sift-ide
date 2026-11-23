@@ -84,6 +84,11 @@ concurrency: 4
 lite:
   maxStatements: 3
 
+# Units from the same file are described together, up to this many per AI call.
+# Fewer calls means the instructions are sent fewer times. 1 describes each unit on its own.
+batch:
+  maxUnits: 8
+
 # Optional model routing overrides, shared by everyone on the project.
 # Personal overrides belong in .sift/models.local.yaml (not committed).
 # models:

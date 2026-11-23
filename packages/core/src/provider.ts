@@ -50,6 +50,12 @@ export interface CompletionRequest {
   /** Expected output shape. */
   jsonSchema: object;
   maxOutputTokens?: number;
+  /**
+   * For a batch request (several units in one call): each unit's own prompt and schema. The
+   * response is `{ units: [{ symbol, ...description }] }`. Providers send `prompt` as usual; this
+   * is for logging and fakes.
+   */
+  parts?: { symbol: string; prompt: string; jsonSchema: object }[];
 }
 
 export interface CompletionResult {

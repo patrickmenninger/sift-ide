@@ -149,7 +149,7 @@ models:                       # optional; shared by the team
     small: { model: claude-haiku-5-5, effort: low }   # use another model for a tier
 ```
 
-**Models.** Each task runs on a tier, and each tier maps to a model: describing on the frontier tier (Opus 5.5), small functions and caller checks on the small tier (Haiku 5.5). `sift models` shows the current routing and where each choice came from. Personal overrides go in `.sift/models.local.yaml` with the same `tasks` / `tiers` shape. If a model isn't available on your plan, Sift falls back to the next tier and says so.
+**Models.** Each task runs on a tier, and each tier maps to a model: describing and updating on the mid tier (Sonnet 5.5), small functions and caller checks on the small tier (Haiku 5.5). `sift models` shows the current routing and where each choice came from. Personal overrides go in `.sift/models.local.yaml` with the same `tasks` / `tiers` shape. If a model isn't available on your plan, Sift falls back to the next tier and says so.
 
 **Rule packs** teach Sift which library calls have effects and how frameworks connect code. Built-in packs cover Prisma, Node's `fs` and `child_process`, `fetch`, `console`, and Express ([list](packages/rules/packs/README.md)). Add your own in `.sift/rules/*.yaml`, for example for your own event bus:
 

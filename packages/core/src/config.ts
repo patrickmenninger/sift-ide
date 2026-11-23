@@ -22,6 +22,8 @@ export interface SiftConfig {
   /** Maximum concurrent AI calls. */
   concurrency: number;
   lite: { maxStatements: number };
+  /** Most units described together in one AI call (units of the same file and task). 1 means one call per unit. */
+  batch: { maxUnits: number };
   /** Committed routing overrides (design §4.2). */
   models: {
     tasks: Partial<Record<Task, Tier>>;
@@ -36,6 +38,7 @@ export function defaultConfig(): SiftConfig {
     provider: "claude-code",
     concurrency: 4,
     lite: { maxStatements: 3 },
+    batch: { maxUnits: 8 },
     models: { tasks: {}, tiers: {} },
   };
 }
@@ -58,7 +61,7 @@ export function parseConfig(text: string, sourceName = CONFIG_FILE): SiftConfig 
     throw new SiftError("CONFIG_INVALID", `${sourceName} must be a mapping of settings.`);
   }
 
-  checkKeys(raw, ["include", "exclude", "provider", "concurrency", "lite", "models"], "", problems);
+  checkKeys(raw, ["include", "exclude", "provider", "concurrency", "lite", "batch", "models"], "", problems);
 
   if ("include" in raw) config.include = stringList(raw.include, "include", problems, { nonEmpty: true });
   if ("exclude" in raw) config.exclude = stringList(raw.exclude, "exclude", problems);
@@ -74,6 +77,12 @@ export function parseConfig(text: string, sourceName = CONFIG_FILE): SiftConfig 
         config.lite.maxStatements = positiveInt(raw.lite.maxStatements, "lite.maxStatements", problems);
       }
     } else problems.push("lite: must be a mapping");
+  }
+  if ("batch" in raw) {
+    if (isRecord(raw.batch)) {
+      checkKeys(raw.batch, ["maxUnits"], "batch.", problems);
+      if ("maxUnits" in raw.batch) config.batch.maxUnits = positiveInt(raw.batch.maxUnits, "batch.maxUnits", problems);
+    } else problems.push("batch: must be a mapping");
   }
   if ("models" in raw) parseModels(raw.models, config, problems);
 

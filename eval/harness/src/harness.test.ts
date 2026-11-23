@@ -62,7 +62,7 @@ describe("runEval", () => {
     const [run] = result.runs;
     expect(run!.metrics).toMatchObject({ units: 29, failed: 0, stale: 0, coverage: 1, valid: 1, missedEffects: 0, firstTry: 29 });
     expect(run!.metrics.accuracy).toMatchObject({ correct: 28, wrong: 1, judged: 29 });
-    expect(run!.models).toMatchObject({ describe: "claude-opus-5-5", "describe-lite": "claude-haiku-5-5", update: "claude-opus-5-5", "context-check": "claude-haiku-5-5" });
+    expect(run!.models).toMatchObject({ describe: "claude-sonnet-5-5", "describe-lite": "claude-haiku-5-5", update: "claude-sonnet-5-5", "context-check": "claude-haiku-5-5" });
     const transfer = run!.units.find((u) => u.unit === "src/accounts/account-service.ts#AccountService.transferFunds")!;
     expect(transfer.checks.filter((c) => !c.pass).map((c) => `${c.kind} ${c.subject}`)).toEqual(["warn missing-check", "warn unawaited-promise"]);
     expect(run!.units.find((u) => u.unit === "src/http/routes.ts#statusFor")!.checks[0]).toMatchObject({ kind: "mention", pass: false });
@@ -85,7 +85,7 @@ describe("runEval", () => {
     expect(lines.join("\n")).toContain("judging 29 descriptions with claude-opus-5-5…");
 
     const md = renderMarkdown(result);
-    expect(md).toContain("| recommended | claude-opus-5-5 / claude-haiku-5-5 / claude-opus-5-5 / claude-haiku-5-5 | 100% | 0 |");
+    expect(md).toContain("| recommended | claude-sonnet-5-5 / claude-haiku-5-5 / claude-sonnet-5-5 / claude-haiku-5-5 | 100% | 0 |");
     expect(md).toContain("**self-graded**");
     expect(md).toContain("- src/accounts/account-service.ts#AccountService.transferFunds: missing warning unawaited-promise");
     expect(md).toContain("- src/http/routes.ts#createRouter — wrong\n  - major: Leaves out the balance route.");
@@ -102,7 +102,7 @@ describe("eval files and metrics", () => {
   it("loads the bank-app expectations and the matrix, and rejects malformed files", async () => {
     const e = await loadExpectations(EVAL_DIR, "bank-app");
     expect(e.units.find((u) => u.unit === "src/accounts/money.ts#formatCents")).toEqual({ unit: "src/accounts/money.ts#formatCents", lite: true, mustMention: ["formats cents as a dollar string"], mustWarn: [], mustNotWarn: [] });
-    expect((await loadMatrix(EVAL_DIR)).map((c) => c.name)).toEqual(["recommended", "describe-on-mid"]);
+    expect((await loadMatrix(EVAL_DIR)).map((c) => c.name)).toEqual(["recommended", "describe-on-frontier"]);
 
     const dir = await mkdtemp(join(tmpdir(), "sift-evalfiles-"));
     const { mkdir } = await import("node:fs/promises");

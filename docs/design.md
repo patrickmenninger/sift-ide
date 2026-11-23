@@ -257,13 +257,13 @@ A `FakeProvider` that returns canned responses is used for engine tests.
 
 Routing is two lookups: **task → tier**, then **tier → model** for the active provider (requirements §8.2).
 
-Task → tier (fixed in core):
+Task → tier (fixed in core). `describe` and `update` moved from frontier to mid after the bank-app evaluation showed Sonnet 5.5 matching Opus 5.5 on expectations and accuracy at about a third less cost (§13.4); frontier stays available as an override.
 
 | Task | Recommended tier | Minimum tier |
 |---|---|---|
-| `describe` | frontier | mid |
+| `describe` | mid | mid |
 | `describe-lite` | small | small |
-| `update` | frontier | mid |
+| `update` | mid | mid |
 | `context-check` | small | small |
 | `judge` | frontier | frontier |
 
@@ -622,7 +622,7 @@ Output:
 
 Steps with `status: user-edited` are flagged in the prompt so their wording is preserved unless it has become wrong; if it has, the unit is marked for review rather than silently rewritten.
 
-Implemented as `prompts/update.md` (task `update`, frontier tier), a self-contained prompt with the description rules in short form, the update rules, and two short examples. The user prompt is the describe input plus the previous description as JSON (steps with IDs and `covers`, which refer to the old code's keys) and the diff: the whole new unit, line by line, with removed lines marked `-` and added lines `+` (`core/text-diff.ts`; indentation-only changes are not shown as changes). The diff also passes through secret filtering. Without the old source (§6.5), the prompt says so and the model compares the description with the code. `user-edited` status is unit-level in schema v0, so the whole unit's wording is treated as the person's.
+Implemented as `prompts/update.md` (task `update`, mid tier), a self-contained prompt with the description rules in short form, the update rules, and two short examples. The user prompt is the describe input plus the previous description as JSON (steps with IDs and `covers`, which refer to the old code's keys) and the diff: the whole new unit, line by line, with removed lines marked `-` and added lines `+` (`core/text-diff.ts`; indentation-only changes are not shown as changes). The diff also passes through secret filtering. Without the old source (§6.5), the prompt says so and the model compares the description with the code. `user-edited` status is unit-level in schema v0, so the whole unit's wording is treated as the person's.
 
 Validation adds: a step's `id` must be a step of the previous description, used once (§8). Derivation keeps those IDs, gives new steps fresh ones, and keeps the ID of every warning whose kind and text are unchanged.
 

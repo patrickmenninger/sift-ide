@@ -27,6 +27,7 @@ exclude: ["**/*.gen.ts"]
 provider: claude-code
 concurrency: 2
 lite: { maxStatements: 5 }
+batch: { maxUnits: 4 }
 models:
   tasks: { describe: mid }
   tiers:
@@ -38,6 +39,7 @@ models:
       provider: "claude-code",
       concurrency: 2,
       lite: { maxStatements: 5 },
+      batch: { maxUnits: 4 },
       models: {
         tasks: { describe: "mid" },
         tiers: { small: { model: "claude-haiku-5-5", effort: "low" } },
@@ -57,7 +59,7 @@ models:
     mid: { model: x, effort: turbo }
 `);
     expect(problems).toEqual([
-      "concurency: unknown setting (expected one of include, exclude, provider, concurrency, lite, models)",
+      "concurency: unknown setting (expected one of include, exclude, provider, concurrency, lite, batch, models)",
       "include: must contain at least one pattern",
       "concurrency: must be a positive whole number",
       "models.tasks.describe: must be one of frontier, mid, small",

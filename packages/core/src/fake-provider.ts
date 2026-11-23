@@ -26,10 +26,17 @@ export class FakeProvider implements Provider {
 
   async complete(req: CompletionRequest): Promise<CompletionResult> {
     this.requests.push(req);
+    // A batch is answered unit by unit, so responders written for single units work unchanged.
+    const json = req.parts
+      ? { units: await Promise.all(req.parts.map(async (p) => ({ symbol: p.symbol, ...(await this.answer({ ...req, prompt: p.prompt, jsonSchema: p.jsonSchema })) as object }))) }
+      : await this.answer(req);
+    return { json, text: JSON.stringify(json), usage: { inputTokens: Math.ceil(req.prompt.length / 4), outputTokens: 100 }, model: req.model.model, durationMs: 1 };
+  }
+
+  private async answer(req: CompletionRequest): Promise<unknown> {
     const key = `${req.task}\n${req.prompt.split("\nCode:")[0]}`;
     const attempt = (this.attempts.get(key) ?? 0) + 1;
     this.attempts.set(key, attempt);
-    const json = await this.respond(req, attempt);
-    return { json, text: JSON.stringify(json), usage: { inputTokens: Math.ceil(req.prompt.length / 4), outputTokens: 100 }, model: req.model.model, durationMs: 1 };
+    return this.respond(req, attempt);
   }
 }

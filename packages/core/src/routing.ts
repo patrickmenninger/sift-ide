@@ -13,9 +13,9 @@ import { EFFORTS, TASKS, TIERS, type Effort, type ModelChoice, type Task, type T
  */
 
 export const TASK_TIERS: Record<Task, { recommended: Tier; minimum: Tier }> = {
-  describe: { recommended: "frontier", minimum: "mid" },
+  describe: { recommended: "mid", minimum: "mid" },
   "describe-lite": { recommended: "small", minimum: "small" },
-  update: { recommended: "frontier", minimum: "mid" },
+  update: { recommended: "mid", minimum: "mid" },
   "context-check": { recommended: "small", minimum: "small" },
   judge: { recommended: "frontier", minimum: "frontier" },
 };

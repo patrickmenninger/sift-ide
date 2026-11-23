@@ -24,7 +24,12 @@ async function sift(provider: FakeProvider, ...args: string[]) {
   return { code, out: out.join("\n"), err: err.join("\n") };
 }
 
-const unitOf = (req: CompletionRequest) => /^Unit: (.+) \(/m.exec(req.prompt)![1]!;
+const unitOf = (req: { prompt: string }) => /^Unit: (.+) \(/m.exec(req.prompt)![1]!;
+/** The units a request describes: one, or several for a batch. */
+const unitsOf = (req: CompletionRequest) => (req.parts ? req.parts.map(unitOf) : [unitOf(req)]);
+/** The prompt for one unit, whether it was sent alone or in a batch. */
+const promptFor = (requests: CompletionRequest[], unit: string) =>
+  requests.flatMap((q): { prompt: string }[] => q.parts ?? [q]).find((q) => unitOf(q) === unit)!.prompt;
 
 /** The previous description shown in an update prompt, if any. */
 function previousOf(req: CompletionRequest): { steps?: { id: string; covers: string[] }[] } | null {
@@ -73,10 +78,10 @@ describe("sift generate", () => {
     expect(r.out).toContain("1 warning in the new and updated descriptions");
 
     // Callees are described before their callers, and callers see the callees' summaries.
-    const order = provider.requests.map(unitOf);
+    const order = provider.requests.flatMap(unitsOf);
     expect(order.indexOf("PrismaAccountRepository.save")).toBeLessThan(order.indexOf("AccountService.transferFunds"));
     expect(order.indexOf("AccountService.transferFunds")).toBeLessThan(order.indexOf("createRouter"));
-    const transferPrompt = provider.requests.find((q) => unitOf(q) === "AccountService.transferFunds")!.prompt;
+    const transferPrompt = promptFor(provider.requests, "AccountService.transferFunds");
     expect(transferPrompt).toContain("implemented by PrismaAccountRepository.save: Does what PrismaAccountRepository.save does.");
 
     const service = (await readSiftFile(dir, "src/accounts/account-service.ts"))!.file;
@@ -87,7 +92,7 @@ describe("sift generate", () => {
     expect(transfer).toMatchObject({
       status: "generated",
       effects: ["db.read", "db.write", "event.emit", "throws"],
-      generatedBy: { provider: "claude-code", model: "claude-opus-5-5", prompt: "describe@2", belowTier: false },
+      generatedBy: { provider: "claude-code", model: "claude-sonnet-5-5", prompt: "describe@2+batch@2", belowTier: false },
     });
     expect(transfer.contextHash).toMatch(/^[0-9a-f]{16}$/);
     const saveFrom = transfer.steps.find((s) => s.covers.includes("5"))!;
@@ -182,7 +187,7 @@ describe("sift generate", () => {
     expect(status.out).toContain("Files moved (1) — generate moves their .sift files:\n  src/legacy/report.js → src/reports/report.js");
     expect(status.out).toContain("Out of sync");
     const plan = await sift(provider, "-C", dir, "generate", "--dry-run");
-    expect(plan.out).toContain("src/http/routes.ts#httpStatusFor  renamed and changed · update · claude-opus-5-5 (medium)");
+    expect(plan.out).toContain("src/http/routes.ts#httpStatusFor  renamed and changed · update · claude-sonnet-5-5 (medium)");
     expect(plan.out).toContain("5 units may get a context check");
 
     const calls = provider.requests.length;
@@ -190,11 +195,11 @@ describe("sift generate", () => {
     expect(sync.err).toBe("");
     expect(sync.code).toBe(EXIT.ok);
     const asked = provider.requests.slice(calls);
-    expect(asked.filter((q) => q.task === "update").map(unitOf).sort()).toEqual(["PrismaAccountRepository.getAccount", "applyMonthlyInterest", "createRouter", "httpStatusFor"]);
-    expect(asked.filter((q) => q.task === "context-check").map(unitOf).sort()).toEqual([
+    expect(asked.filter((q) => q.task === "update").flatMap(unitsOf).sort()).toEqual(["PrismaAccountRepository.getAccount", "applyMonthlyInterest", "createRouter", "httpStatusFor"]);
+    expect(asked.filter((q) => q.task === "context-check").flatMap(unitsOf).sort()).toEqual([
       "AccountService.deposit", "AccountService.getBalance", "AccountService.transferFunds", "AccountService.withdraw",
     ]);
-    expect(asked.length).toBe(8);
+    expect(asked.length).toBe(7); // createRouter and httpStatusFor (same file) are updated in one call
 
     // The update prompt shows the previous description and the code change.
     const update = asked.find((q) => unitOf(q) === "applyMonthlyInterest")!;
@@ -266,8 +271,51 @@ describe("sift generate", () => {
     expect(money.units.map((u) => [u.symbol, u.status])).toEqual([["formatCents", "generated"], ["applyMonthlyInterest", "stale"]]);
   }, 60_000);
 
+  it("describes a file's units in one call, and asks again alone for a unit the batch got wrong", async () => {
+    const dir = await fixtureCopy();
+    const provider = new FakeProvider((req, attempt) => {
+      if (unitOf(req) === "AccountService.deposit" && attempt === 1) return answer(req, { dropKey: "1" });
+      return answer(req);
+    });
+    const r = await sift(provider, "-C", dir, "generate", "src/accounts/account-service.ts");
+    expect(r.code).toBe(EXIT.ok);
+
+    // The full units of the file go in one batch; the lite units in another (a different model).
+    const batches = provider.requests.filter((q) => q.parts);
+    expect(batches.map((q) => [q.task, q.parts!.length])).toEqual([["describe-lite", 2], ["describe", 5]]);
+    const batch = batches.find((q) => q.task === "describe")!;
+    expect(batch.promptVersion).toBe("describe@2+batch@2");
+    expect(batch.system).toContain("## Several units in one request");
+    expect(batch.prompt).toContain("This request has 5 units from src/accounts/account-service.ts.");
+    expect(batch.prompt.match(/Respond with one JSON object matching this JSON Schema/g)).toHaveLength(1);
+
+    // deposit's part did not validate, so it was asked alone, told what was wrong.
+    const alone = provider.requests.filter((q) => !q.parts);
+    expect(alone.map(unitOf)).toEqual(["AccountService.deposit"]);
+    expect(alone[0]!.prompt).toContain("An earlier response for this unit had these problems; avoid them:\n- These structure keys are not covered by any step: 1");
+
+    const units = (await readSiftFile(dir, "src/accounts/account-service.ts"))!.file.units;
+    expect(units.every((u) => u.status === "generated")).toBe(true);
+    expect(units.find((u) => u.symbol === "AccountService.deposit")!.generatedBy?.prompt).toBe("describe@2");
+    expect(units.find((u) => u.symbol === "AccountService.withdraw")!.generatedBy?.prompt).toBe("describe@2+batch@2");
+  }, 60_000);
+
+  it("describes each unit on its own with batch.maxUnits: 1", async () => {
+    const dir = await fixtureCopy();
+    await writeFile(join(dir, "sift.config.yaml"), `${await readFile(join(dir, "sift.config.yaml"), "utf8")}\nbatch:\n  maxUnits: 1\n`);
+    const provider = new FakeProvider((req) => answer(req));
+    expect((await sift(provider, "-C", dir, "generate", "src/accounts/account-service.ts")).code).toBe(EXIT.ok);
+    expect(provider.requests.some((q) => q.parts)).toBe(false);
+    expect(provider.requests).toHaveLength(7);
+  }, 60_000);
+
   it("falls back to the next tier when a model is unavailable, and records it", async () => {
     const dir = await fixtureCopy();
+    await writeFile(join(dir, "sift.config.yaml"), `${await readFile(join(dir, "sift.config.yaml"), "utf8")}
+models:
+  tasks:
+    describe: frontier
+`);
     const provider = new FakeProvider((req) => {
       if (req.model.model === "claude-opus-5-5") throw new SiftError("MODEL_UNAVAILABLE", "no access to opus");
       return answer(req);
@@ -277,7 +325,8 @@ describe("sift generate", () => {
     expect(r.out).toContain("! claude-sonnet-5-5 is used instead of the frontier tier: no access to opus");
     expect(provider.requests.filter((q) => q.model.model === "claude-opus-5-5")).toHaveLength(1);
     const unit = (await readSiftFile(dir, "src/accounts/money.ts"))!.file.units.find((u) => u.symbol === "applyMonthlyInterest")!;
-    expect(unit.generatedBy).toEqual({ provider: "claude-code", model: "claude-sonnet-5-5", prompt: "describe@2", belowTier: true });
+    // mid is still the recommended tier for describe, so the substitute is not below it.
+    expect(unit.generatedBy).toEqual({ provider: "claude-code", model: "claude-sonnet-5-5", prompt: "describe@2", belowTier: false });
   }, 60_000);
 
   it("stops when Claude Code is not logged in, without writing anything", async () => {
@@ -300,7 +349,7 @@ describe("sift generate", () => {
         "Would describe or update 3 units:",
         "  src/accounts/money.ts#formatCents  new · describe-lite · claude-haiku-5-5 (low)",
         "  src/accounts/money.ts#toCents  new · describe-lite · claude-haiku-5-5 (low)",
-        "  src/accounts/money.ts#applyMonthlyInterest  new · describe · claude-opus-5-5 (medium)",
+        "  src/accounts/money.ts#applyMonthlyInterest  new · describe · claude-sonnet-5-5 (medium)",
       ].join("\n"),
     );
     expect(provider.requests).toHaveLength(0);
@@ -318,7 +367,7 @@ describe("sift eval", () => {
     expect(r.err).toBe("");
     expect(r.code).toBe(EXIT.ok);
     expect(r.out).toContain("Evaluating bank-app: describe=mid, 1 run each, no judge, no churn.");
-    expect(r.out).toContain("| describe=mid | claude-sonnet-5-5 / claude-haiku-5-5 / claude-opus-5-5 / claude-haiku-5-5 | 100% | 0 |");
+    expect(r.out).toContain("| describe=mid | claude-sonnet-5-5 / claude-haiku-5-5 / claude-sonnet-5-5 / claude-haiku-5-5 | 100% | 0 |");
     expect(r.out).toContain("No judge: mentions and accuracy were not scored");
     expect(provider.requests.filter((q) => q.task === "describe").every((q) => q.model.model === "claude-sonnet-5-5")).toBe(true);
 
@@ -331,9 +380,9 @@ describe("sift eval", () => {
 describe("sift models", () => {
   it("shows task → tier → model with the source of each override", async () => {
     const dir = await fixtureCopy();
-    await writeFile(join(dir, "sift.config.yaml"), "models:\n  tasks:\n    describe: mid\n");
+    await writeFile(join(dir, "sift.config.yaml"), "models:\n  tasks:\n    describe: small\n");
     const r = await sift(new FakeProvider(() => ({})), "-C", dir, "models");
-    expect(r.out).toContain("describe       mid (config)  claude-sonnet-5-5  medium  frontier · below recommended");
-    expect(r.out).toContain("describe-lite  small         claude-haiku-5-5   low     small");
+    expect(r.out).toContain("describe       small (config)  claude-haiku-5-5   low     mid ! below minimum");
+    expect(r.out).toContain("describe-lite  small           claude-haiku-5-5   low     small");
   });
 });

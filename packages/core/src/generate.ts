@@ -190,29 +190,62 @@ export async function generate(options: GenerateOptions): Promise<GenerateReport
     graph, rules, extractions, known, before, cycles, provider, router, report, emit, textOf, cache, substitutions: new Map(), abort: null,
   };
 
-  // Callees before callers, so callers see their callees' new summaries; recursion groups go together.
+  // Units to describe or update are batched per file and task (one AI call each, up to
+  // batch.maxUnits units); kept units are handled one by one. Batches run callees before callers,
+  // so callers see their callees' new summaries; batches that depend on each other go together.
   const limit = semaphore(config.concurrency);
   const byRef = new Map(work.map((w) => [w.ref, w]));
-  const edges = (ref: string) => graph.edgesFrom(ref, "calls").flatMap((e) => [e.to, ...graph.implementers(e.to)]).filter((t) => t !== ref && byRef.has(t));
-  const components = stronglyConnected(work.map((w) => w.ref), edges);
+  const batches: WorkItem[][] = [];
+  const open = new Map<string, WorkItem[]>();
+  for (const w of work) {
+    if (w.mode === "keep") {
+      batches.push([w]);
+      continue;
+    }
+    const key = `${w.file}\n${describeTaskOf(w)}`;
+    let batch = open.get(key);
+    if (!batch || batch.length >= config.batch.maxUnits) {
+      batch = [];
+      open.set(key, batch);
+      batches.push(batch);
+    }
+    batch.push(w);
+  }
+  const batchOf = new Map<string, number>();
+  batches.forEach((b, i) => b.forEach((w) => batchOf.set(w.ref, i)));
+  const unitEdges = (ref: string) => graph.edgesFrom(ref, "calls").flatMap((e) => [e.to, ...graph.implementers(e.to)]).filter((t) => t !== ref && byRef.has(t));
+  const batchEdges = (key: string) => [...new Set(batches[Number(key)]!.flatMap((w) => unitEdges(w.ref).map((t) => String(batchOf.get(t)!))))].filter((k) => k !== key);
+  const components = stronglyConnected(batches.map((_, i) => String(i)), batchEdges);
   const componentOf = new Map<string, number>();
-  components.forEach((c, i) => c.forEach((ref) => componentOf.set(ref, i)));
+  components.forEach((c, i) => c.forEach((key) => componentOf.set(key, i)));
+  const record = (unit: SiftUnit | null | undefined, item: WorkItem) => {
+    if (!unit) return;
+    results.set(item.ref, unit);
+    known.set(item.ref, { id: unit.id, summary: unit.summary });
+  };
   const done = new Map<number, Promise<void>>();
   const run = (index: number): Promise<void> => {
     let p = done.get(index);
     if (p) return p;
     p = (async () => {
-      const deps = new Set(components[index]!.flatMap((ref) => edges(ref).map((t) => componentOf.get(t)!)).filter((c) => c !== index));
+      const deps = new Set(components[index]!.flatMap((key) => batchEdges(key).map((k) => componentOf.get(k)!)).filter((c) => c !== index));
       await Promise.all([...deps].map(run));
       await Promise.all(
-        components[index]!.map((ref) =>
+        components[index]!.map((key) =>
           limit(async () => {
             if (ctx.abort) return;
-            const item = byRef.get(ref)!;
-            const unit = await processItem(item, ctx);
-            if (unit) {
-              results.set(item.ref, unit);
-              known.set(item.ref, { id: unit.id, summary: unit.summary });
+            const batch = batches[Number(key)]!;
+            if (batch.length === 1) {
+              record(await processItem(batch[0]!, ctx), batch[0]!);
+              return;
+            }
+            const units = await describeBatch(batch, ctx);
+            for (const item of batch) record(units.get(item.ref), item);
+            // Units in a batch may call each other: their context hashes can only include each
+            // other's summaries once the whole batch is recorded.
+            for (const item of batch) {
+              const unit = units.get(item.ref);
+              if (unit) setContextHash(unit, expectedContextHash(calleeRefsOf(item.unit, item.ref, graph, cycles), known));
             }
           }),
         ),
@@ -376,10 +409,27 @@ function markEdited(unit: SiftUnit, item: WorkItem, ctx: Context): void {
   } else if (unit.status === "verified" || unit.status === "user-edited") unit.status = "generated";
 }
 
-async function describeOne(item: WorkItem, ctx: Context): Promise<SiftUnit | null> {
-  const started = Date.now();
+/** Everything needed to ask for, check, and turn into a unit one describe or update response. */
+interface PreparedDescribe {
+  task: Task;
+  template: PromptTemplate;
+  schema: object;
+  nodeEffects: Map<string, Effect[]>;
+  prompt: string;
+  updating: boolean;
+  previousStepIds: Set<string> | undefined;
+}
+
+type DescribeValue = { response: DescribeResponse; uncovered: string[] };
+
+/** The task a describe or update work item runs as. */
+function describeTaskOf(item: WorkItem): Task {
+  return item.lite ? "describe-lite" : item.mode === "update" ? "update" : "describe";
+}
+
+async function prepareDescribe(item: WorkItem, ctx: Context): Promise<PreparedDescribe> {
   const updating = item.mode === "update";
-  const task: Task = item.lite ? "describe-lite" : updating ? "update" : "describe";
+  const task = describeTaskOf(item);
   const template = await loadPrompt(task);
   const schema = item.lite ? DESCRIBE_LITE_SCHEMA : updating ? UPDATE_SCHEMA : DESCRIBE_SCHEMA;
   const { nodes: nodeEffects } = effectsOfUnit(item.unit, ctx.rules);
@@ -400,17 +450,146 @@ async function describeOne(item: WorkItem, ctx: Context): Promise<SiftUnit | nul
   });
   ctx.report.redactions += input.redactions;
 
-  const previousStepIds = new Set<string>();
-  const index = (steps: SiftStep[]): void => steps.forEach((s) => (previousStepIds.add(s.id), index(s.steps)));
-  if (updating && !item.lite) index(item.previous!.steps);
-  const outcome = await askWithRetry(ctx, item, task, template, input.prompt, schema, (json) => {
-    const v = validateDescribeResponse(json, item.unit, item.lite, updating && !item.lite ? previousStepIds : undefined);
-    // Coverage is the one problem a unit may still be written with, as stale.
-    const hard = v.problems.length - (v.uncovered.length > 0 ? 1 : 0);
-    return { value: v.response ? { response: v.response, uncovered: v.uncovered } : null, problems: v.problems, soft: hard === 0 && v.response !== null };
-  });
+  let previousStepIds: Set<string> | undefined;
+  if (updating && !item.lite) {
+    previousStepIds = new Set<string>();
+    const ids = previousStepIds;
+    const index = (steps: SiftStep[]): void => steps.forEach((s) => (ids.add(s.id), index(s.steps)));
+    index(item.previous!.steps);
+  }
+  return { task, template, schema, nodeEffects, prompt: input.prompt, updating, previousStepIds };
+}
+
+function checkDescribe(item: WorkItem, prep: PreparedDescribe, json: unknown): { value: DescribeValue | null; problems: string[]; soft: boolean } {
+  const v = validateDescribeResponse(json, item.unit, item.lite, prep.previousStepIds);
+  // Coverage is the one problem a unit may still be written with, as stale.
+  const hard = v.problems.length - (v.uncovered.length > 0 ? 1 : 0);
+  return { value: v.response ? { response: v.response, uncovered: v.uncovered } : null, problems: v.problems, soft: hard === 0 && v.response !== null };
+}
+
+/**
+ * Describe one unit on its own. `hint` lists problems an earlier (batched) response for this unit
+ * had, so the model can avoid them.
+ */
+async function describeOne(item: WorkItem, ctx: Context, hint: string[] = []): Promise<SiftUnit | null> {
+  const started = Date.now();
+  const prep = await prepareDescribe(item, ctx);
+  const prompt = hint.length === 0 ? prep.prompt : `${prep.prompt}\n\nAn earlier response for this unit had these problems; avoid them:\n${hint.map((p) => `- ${p}`).join("\n")}`;
+  const outcome = await askWithRetry(ctx, item, prep.task, prep.template, prompt, prep.schema, (json) => checkDescribe(item, prep, json));
   if (!outcome) return null;
-  const { response, uncovered } = outcome.value as { response: DescribeResponse; uncovered: string[] };
+  return finishDescribe(item, prep, outcome.value, outcome.attempts, outcome.route, prep.template.id, started, ctx);
+}
+
+/** The system-prompt addition for a batch request (several units of one file in one call). */
+const BATCH_PROMPT_ID = "batch@2";
+const BATCH_NOTE = `## Several units in one request
+
+This request contains several units from the same file. Each one starts with a "# Unit" heading and has its own inputs, doc comment, code, structure keys, and calls. Describe each unit on its own, following everything above, as carefully as if it were the only unit in the request. Structure keys belong to the unit they are listed under. Units in this request may call each other: their code is all here, so use it to say what such a call does.
+
+Review each unit for warnings separately:
+- A unit's warnings are about that unit's own code. If two units share a problem (for example, a route handler and the router that registers it both serve data without checking the caller is allowed to see it), raise the warning on each of them. Never leave a warning off one unit because another unit in this request already has it.
+- If a unit has a doc comment, compare it with that unit's code, and raise \`comment-contradicts-code\` when they disagree, even when your description already states what the code really does.
+
+Respond with one JSON object of the form {"units": [{"symbol": "<the unit's symbol>", ...that unit's description...}]}: one entry per unit, in the order given, each with exactly the fields a single description has plus "symbol".`;
+
+/** The response schema of a batch: the single-unit schema, once per unit, with the unit's symbol. */
+function batchSchema(schema: object): object {
+  const s = schema as { $defs?: object; properties: object; required: string[] };
+  return {
+    type: "object",
+    ...(s.$defs ? { $defs: s.$defs } : {}),
+    properties: {
+      units: {
+        type: "array",
+        items: { type: "object", properties: { symbol: { type: "string" }, ...s.properties }, required: ["symbol", ...s.required], additionalProperties: false },
+      },
+    },
+    required: ["units"],
+    additionalProperties: false,
+  };
+}
+
+/**
+ * Describe several units of one file, all with the same task, in one AI call. The instructions,
+ * examples, and schema are sent once instead of once per unit. Units whose part of the response
+ * is missing or does not validate are described again on their own, told what was wrong.
+ */
+async function describeBatch(items: WorkItem[], ctx: Context): Promise<Map<string, SiftUnit>> {
+  const started = Date.now();
+  const out = new Map<string, SiftUnit>();
+  const preps = await Promise.all(items.map((item) => prepareDescribe(item, ctx)));
+  const { task, template, schema } = preps[0]!;
+  const fullSchema = batchSchema(schema);
+  const sections = items.map((item, i) => `# Unit ${i + 1} of ${items.length}: ${item.unit.symbol}\n\n${preps[i]!.prompt}`);
+  const schemaNote = ctx.provider.capabilities.nativeJsonSchema ? "" : `\n\nRespond with one JSON object matching this JSON Schema:\n${JSON.stringify(fullSchema)}`;
+  const prompt = `This request has ${items.length} units from ${items[0]!.file}.\n\n${sections.join("\n\n")}${schemaNote}`;
+  const system = `${template.text}\n\n${BATCH_NOTE}`;
+
+  const hints = new Map<string, string[]>();
+  let route = ctx.router.route(task);
+  if ((system.length + prompt.length) / 4 > ctx.provider.capabilities.contextTokens(route.choice.model)) {
+    for (const item of items) hints.set(item.ref, []);
+  } else {
+    try {
+      const { result, route: used } = await completeWithFallback(ctx, task, route, {
+        task, model: route.choice, promptVersion: `${template.id}+${BATCH_PROMPT_ID}`, system, prompt, jsonSchema: fullSchema,
+        parts: items.map((item, i) => ({ symbol: item.unit.symbol, prompt: preps[i]!.prompt, jsonSchema: schema })),
+      });
+      route = used;
+      const entries = isRecordValue(result.json) && Array.isArray(result.json.units) ? (result.json.units as unknown[]) : [];
+      items.forEach((item, i) => {
+        const bySymbol = entries.find((e) => isRecordValue(e) && e.symbol === item.unit.symbol);
+        const entry = bySymbol ?? (entries.length === items.length ? entries[i] : undefined);
+        if (!isRecordValue(entry)) {
+          hints.set(item.ref, []);
+          return;
+        }
+        const { symbol: _symbol, ...json } = entry;
+        const checked = checkDescribe(item, preps[i]!, json);
+        if (checked.value === null || checked.problems.length > 0) {
+          hints.set(item.ref, checked.problems);
+          return;
+        }
+        const unit = finishDescribe(item, preps[i]!, checked.value, 1, route, `${template.id}+${BATCH_PROMPT_ID}`, started, ctx);
+        if (route.belowMinimum && !ctx.report.belowMinimum.includes(item.ref)) ctx.report.belowMinimum.push(item.ref);
+        out.set(item.ref, unit);
+      });
+    } catch (err) {
+      if (err instanceof SiftError && err.code === "PROVIDER_AUTH") {
+        ctx.abort ??= err;
+        return out;
+      }
+      for (const item of items) hints.set(item.ref, []);
+    }
+  }
+  // Whatever the batch did not settle is described unit by unit (one at a time: this holds one
+  // concurrency slot).
+  for (const item of items) {
+    if (ctx.abort || !hints.has(item.ref)) continue;
+    const unit = await describeOne(item, ctx, hints.get(item.ref));
+    if (unit) out.set(item.ref, unit);
+  }
+  return out;
+}
+
+function isRecordValue(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function finishDescribe(
+  item: WorkItem,
+  prep: PreparedDescribe,
+  value: DescribeValue,
+  attempts: number,
+  route: Route,
+  promptId: string,
+  started: number,
+  ctx: Context,
+): SiftUnit {
+  const { response, uncovered } = value;
+  const { task, nodeEffects, updating } = prep;
+  const outcome = { attempts, route };
+  const template = { id: promptId };
 
   const unit = deriveSiftUnit({
     unit: item.unit,

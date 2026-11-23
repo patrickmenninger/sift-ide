@@ -9,7 +9,7 @@ describe("Router", () => {
   it("routes tasks to the shipped claude-code models by default", async () => {
     const router = new Router(await loadModelMap("claude-code"), defaultConfig());
     expect(router.route("describe")).toMatchObject({
-      tier: "frontier", belowTier: false, choice: { provider: "claude-code", model: "claude-opus-5-5", effort: "medium", tier: "frontier" },
+      tier: "mid", belowTier: false, choice: { provider: "claude-code", model: "claude-sonnet-5-5", effort: "medium", tier: "mid" },
     });
     expect(router.route("describe-lite").choice).toMatchObject({ model: "claude-haiku-5-5", effort: "low" });
     expect(router.route("judge").choice.effort).toBe("high");
@@ -18,11 +18,12 @@ describe("Router", () => {
 
   it("applies config overrides, then personal overrides, and flags tiers below the recommendation", async () => {
     const config = defaultConfig();
-    config.models.tasks.describe = "mid";
+    config.models.tasks.describe = "frontier";
     config.models.tiers.small = { model: "claude-sonnet-5-5", effort: "low" };
     const router = new Router(await loadModelMap("claude-code"), config, { tasks: { update: "small" }, tiers: {} });
 
-    expect(router.route("describe")).toMatchObject({ tier: "mid", belowTier: true, belowMinimum: false, source: { tier: "config", model: "default" } });
+    expect(router.route("describe")).toMatchObject({ tier: "frontier", belowTier: false, belowMinimum: false, choice: { model: "claude-opus-5-5" }, source: { tier: "config", model: "default" } });
+    expect(router.route("describe", "small")).toMatchObject({ tier: "small", belowTier: true });
     expect(router.route("describe-lite")).toMatchObject({ choice: { model: "claude-sonnet-5-5" }, source: { model: "config" } });
     expect(router.route("update")).toMatchObject({ tier: "small", belowMinimum: true, source: { tier: "local" } });
     expect(router.route("describe", "small")).toMatchObject({ tier: "small", belowMinimum: true, source: { tier: "default" } });
