@@ -258,6 +258,27 @@ function isCovered(key: string, covered: Set<string>): boolean {
 }
 
 /** "1.then.0" → "1.then" → "1" → null. */
+/**
+ * The step that owns each structure key: the deepest step covering the key or its nearest covered
+ * ancestor (design §8, "Deriving the unit").
+ */
+export function stepOwners(steps: SiftStep[]): (key: string) => SiftStep | undefined {
+  const owner = new Map<string, SiftStep>();
+  const index = (list: SiftStep[]): void =>
+    list.forEach((s) => {
+      for (const key of s.covers) owner.set(key, s); // nested steps are indexed after, so deeper steps win
+      index(s.steps);
+    });
+  index(steps);
+  return (key) => {
+    for (let k: string | null = key; k !== null; k = parentKey(k)) {
+      const s = owner.get(k);
+      if (s) return s;
+    }
+    return undefined;
+  };
+}
+
 export function parentKey(key: string): string | null {
   const dot = key.lastIndexOf(".");
   return dot < 0 ? null : key.slice(0, dot);
@@ -369,20 +390,7 @@ type FactSources = Pick<DeriveOptions, "nodeEffects" | "callRefs" | "calleeEffec
  * structure node belongs to the deepest step covering it or its nearest covered ancestor.
  */
 function fillFacts(steps: SiftStep[], unit: ExtractedUnit, o: FactSources): { effects: Effect[]; ownerOf: (key: string) => SiftStep | undefined } {
-  const owner = new Map<string, SiftStep>();
-  const index = (list: SiftStep[]): void =>
-    list.forEach((s) => {
-      for (const key of s.covers) owner.set(key, s); // nested steps are indexed after, so deeper steps win
-      index(s.steps);
-    });
-  index(steps);
-  const ownerOf = (key: string): SiftStep | undefined => {
-    for (let k: string | null = key; k !== null; k = parentKey(k)) {
-      const s = owner.get(k);
-      if (s) return s;
-    }
-    return undefined;
-  };
+  const ownerOf = stepOwners(steps);
 
   const clear = (list: SiftStep[]): void => list.forEach((s) => ((s.calls = []), (s.effects = []), clear(s.steps)));
   clear(steps);

@@ -109,9 +109,30 @@ class Workspace {
 - **Concurrency.** One write operation (generate, apply edit) at a time per workspace, queued; reads are never blocked by AI calls. Long operations take an `AbortSignal` and report progress events.
 - **Saved files only.** The engine reads disk. When an editor buffer is dirty, the extension shows "source has unsaved changes" on the logic document instead of describing unsaved code.
 
+**As built (M9)**, `core/workspace.ts`:
+
+- `Workspace.open({ cwd, adapters, builtinRulesDir, provider? })` loads the config and rule packs once. `provider` may be a function of the config, since the config names the provider.
+- Every query refreshes through the existing fast path and cached extractions; the adapter's program is opened only when a file must be re-extracted, as in Phase 1. Keeping a TypeScript program open between requests is deferred to M14, where the overlays for edit validation (§8.10) need an incremental program anyway; until then a refresh after an edit costs one program build, as `sift` commands do today.
+- Operations run one at a time (`serial`), so two refreshes never write the cache at once.
+- `.sift` files are read through a cache keyed by size and mtime, so a long-running server rereads only files that changed (including changes from git).
+- Beyond the methods above: `readSift`, `extraction`, `unitIndex`, `findRoutes`, `router`, and `migrate`. `verify` refuses units that are changed, renamed, stale, or whose callees' summaries changed. It clears step-level `verified` (the unit now covers them) and keeps `user-edited` steps, because verification and authorship are separate facts.
+- `LogicUnit.freshness` compares the description's `bodyHash` with the code; callee-summary drift is reported by `status`, not per unit.
+- `stepAt` picks the innermost unit containing the position, then the deepest structure node, then the step that owns it (the same ownership rule as `calls`, `describe-output.ts#stepOwners`). A position in a unit's signature returns the unit with no step.
+- `stepTargets` maps `calls` in order. An interface call already lists every described implementation (design §8), so the picker gets them without another lookup. Library targets carry the rule-pack effects for that member.
+- The CLI now runs every command through `Workspace` and gains `sift flow`, `sift verify`, `sift migrate`, and `sift serve`.
+
 ### 4.1 `sift serve` Protocol
 
 JSON-RPC requests mirror the `Workspace` methods (`sift/file`, `sift/callers`, `sift/edit/propose`, …); notifications carry `WorkspaceChange`, progress, and pending-edit state. Protocol types live in `@sift/server` and are imported by the extension, so the two cannot drift. Every request carries a `protocolVersion`; a mismatch is a clear error, not a misread.
+
+**As built (M9)**, `packages/server` (protocol version 1, `vscode-jsonrpc` 9.0.3):
+
+- The client calls `sift/initialize` with its `protocolVersion` first; any other request before it, or a version mismatch, is refused.
+- Requests: `sift/refresh`, `sift/logicFile`, `sift/unit`, `sift/extraction`, `sift/status`, `sift/callers`, `sift/callees`, `sift/impact`, `sift/routes`, `sift/flow`, `sift/sourceRanges`, `sift/stepAt`, `sift/stepTargets`, `sift/generate`, `sift/verify`. The `Requests` map in `protocol.ts` types each one's params and result.
+- Notifications: `sift/didChange` (`{ type: "source" | "descriptions", files }`) and `sift/generateProgress` (`{ token, event }`, for a `sift/generate` that passed a `token`).
+- Sift errors use JSON-RPC code `-32001`, with `data: { code, details }`; `SiftClient` turns them back into `SiftError`.
+- `sift serve` writes only protocol messages to stdout; it logs to stderr.
+- Not yet: cancelling a running `sift/generate` (needs an `AbortSignal` through the pipeline; M11, when the extension can trigger it), and edit methods (M14).
 
 ## 5. MCP Server
 
@@ -206,10 +227,17 @@ Changes from v0:
 | `summary`/`inputs[].meaning`/`returns.meaning` | A unit-level `userEdited: [summary, inputs.amount, returns]` list names the non-step fields written by a person. |
 | `warnings[].resolved` | New, optional: `{ by: "edit", note }` when a warning was answered by an edit (§8.4); resolved warnings are dropped on the next update that no longer finds the problem. |
 
-- **Reading:** v0 and v1 are both accepted; v0 maps directly (no new fields).
-- **Writing:** a file keeps `sift: 0` until something writes a v1-only field into it; then that one file is upgraded. `sift migrate` upgrades every file at once for teams that prefer one commit. This keeps the byte-stable rewrite rule (design §6.3): no file changes just because Sift was upgraded.
+- **Reading:** v0 and v1 are both accepted; v0 maps directly (no new fields). The declared version is kept, and a file that declares 0 but holds v1 fields is invalid (hand-edited, or written by a confused tool).
+- **Writing:** a file keeps `sift: 0` until something writes a v1-only field into it; then that one file is upgraded (`requiredSchemaVersion`, applied by the serializer). New files are written at the current version. `sift migrate` upgrades every file at once for teams that prefer one commit. This keeps the byte-stable rewrite rule (design §6.3): no file changes just because Sift was upgraded, and a migration changes only the header line.
 - **Update and context-check prompts** mark user-edited steps and fields individually (today: the whole unit). A user-edited step whose code did not change is never reworded; one whose code changed is updated only if it became wrong, and then the unit goes `stale` for review as before.
 - **Unit status** becomes derived for display: `stale` if any part is stale, else `user-edited` if any field is, else as stored.
+
+**As built (M9)**, `core/provenance.ts`:
+
+- A unit with `status: user-edited` and no `userEdited` or step statuses is a v0 unit: all its wording is the person's, as before.
+- After an **update** (code changed), user-edited steps and fields carry over while their text is unchanged; step-level `verified` is dropped. If a person's piece was reworded, or the unit came back stale, the unit is written `stale` and listed for review.
+- After a **context check** (code unchanged), reworded steps lose their status, untouched ones keep it (including `verified`), and the unit goes to review only if a person's piece was reworded. A verified unit that was reworded becomes `generated`.
+- The update and context-check prompts name the person's pieces ("A person wrote the summary and steps s_ab12, s_cd34. Keep their wording wherever it is still accurate."). The prompt files are unchanged, so their versions are unchanged; only units with a person's wording see the new sentence.
 
 ## 8. Natural-Language Editing
 

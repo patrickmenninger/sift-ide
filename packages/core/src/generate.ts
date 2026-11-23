@@ -24,7 +24,8 @@ import { loadPrompt, type PromptTemplate } from "./prompts.js";
 import type { CompletionResult, Provider, Task, Tier } from "./provider.js";
 import type { Route, Router } from "./routing.js";
 import type { RuleSet } from "./rules.js";
-import { SIFT_SCHEMA_VERSION, type Effect, type SiftFile, type SiftStep, type SiftUnit } from "./schema.js";
+import { carryProvenance, hasPersonWording, keepsPersonWording } from "./provenance.js";
+import { requiredSchemaVersion, SIFT_SCHEMA_VERSION, type Effect, type SiftFile, type SiftStep, type SiftUnit } from "./schema.js";
 import { deleteSiftFile, writeSiftFile } from "./store.js";
 import { calleeRefsOf, CycleIndex, describedUnits, expectedContextHash, planSync, stronglyConnected, type Ambiguity, type UnitChange } from "./sync.js";
 import { lineDiff } from "./text-diff.js";
@@ -282,7 +283,10 @@ export async function generate(options: GenerateOptions): Promise<GenerateReport
     }
     // fileHash says "this .sift file matches the source"; it is only updated when every unit does.
     const fileHash = current || !old ? extraction.fileHash : old.fileHash;
-    const next: SiftFile = { sift: SIFT_SCHEMA_VERSION, source: file, language: extraction.language, fileHash, units };
+    // An existing file keeps its schema version; the serializer raises it only when its content needs it.
+    const version = old?.sift ?? (moved ? existing.get(moved.from)?.sift : undefined) ?? SIFT_SCHEMA_VERSION;
+    const next: SiftFile = { sift: version, source: file, language: extraction.language, fileHash, units };
+    next.sift = Math.max(next.sift, requiredSchemaVersion(next));
     validateSiftFile(JSON.parse(JSON.stringify(next)), file);
     const written = await writeSiftFile(root, next);
     if (written.changed) report.written.push(written.path);
@@ -395,18 +399,22 @@ async function contextCheck(item: WorkItem, kept: SiftUnit, changes: { name: str
       apply(s.steps);
     });
   apply(updated.steps);
-  if (changed) markEdited(updated, item, ctx);
+  if (changed) markReworded(updated, kept, item, ctx);
   ctx.report.described.push({ unit: item.ref, action: "context-check", stale: updated.status === "stale", uncovered: [], warnings: updated.warnings.length, attempts: outcome.attempts, changed });
   ctx.emit({ type: "described", unit: item.ref, action: "context-check", task, model: outcome.route.choice.model, attempts: outcome.attempts, stale: updated.status === "stale", changed, durationMs: Date.now() - started });
   return updated;
 }
 
-/** After the AI changed a kept description's wording: a person's wording goes to review; verified no longer holds. */
-function markEdited(unit: SiftUnit, item: WorkItem, ctx: Context): void {
-  if (item.previous?.status === "user-edited") {
+/**
+ * After a context check reworded a unit whose code did not change: rewording a person's text sends
+ * the unit to review; reworded steps lose their status, and a verified unit is no longer verified.
+ */
+function markReworded(unit: SiftUnit, previous: SiftUnit, item: WorkItem, ctx: Context): void {
+  carryProvenance(previous, unit, { keepVerified: true });
+  if (hasPersonWording(previous) && !keepsPersonWording(previous, unit)) {
     unit.status = "stale";
     ctx.report.needsReview.push(item.ref);
-  } else if (unit.status === "verified" || unit.status === "user-edited") unit.status = "generated";
+  } else if (unit.status === "verified") unit.status = "generated";
 }
 
 /** Everything needed to ask for, check, and turn into a unit one describe or update response. */
@@ -605,29 +613,21 @@ function finishDescribe(
   });
   setContextHash(unit, expectedContextHash(calleeRefsOf(item.unit, item.ref, ctx.graph, ctx.cycles), ctx.known));
   let changed = true;
-  if (updating && item.previous!.status === "user-edited") {
-    if (unit.status !== "stale" && keepsWording(item.previous!, unit)) unit.status = "user-edited";
-    else markEdited(unit, item, ctx);
+  if (updating) {
+    const previous = item.previous!;
+    // The code changed, so nothing stays verified; a person's wording stays theirs while unchanged.
+    carryProvenance(previous, unit, { keepVerified: false });
+    if (hasPersonWording(previous)) {
+      if (unit.status === "stale" || !keepsPersonWording(previous, unit)) {
+        unit.status = "stale";
+        ctx.report.needsReview.push(item.ref);
+      } else if (previous.status === "user-edited") unit.status = "user-edited";
+    }
+    changed = JSON.stringify(proseOf(previous)) !== JSON.stringify(proseOf(unit));
   }
-  if (updating) changed = JSON.stringify(proseOf(item.previous!)) !== JSON.stringify(proseOf(unit));
   ctx.report.described.push({ unit: item.ref, action: item.mode as GenerateAction, stale: unit.status === "stale", uncovered, warnings: unit.warnings.length, attempts: outcome.attempts, changed });
   ctx.emit({ type: "described", unit: item.ref, action: item.mode as GenerateAction, task, model: outcome.route.choice.model, attempts: outcome.attempts, stale: unit.status === "stale", changed, durationMs: Date.now() - started });
   return unit;
-}
-
-/** True when every piece of a person's wording that the update kept is unchanged. */
-function keepsWording(previous: SiftUnit, next: SiftUnit): boolean {
-  if (previous.summary !== next.summary) return false;
-  if (previous.returns && next.returns && previous.returns.meaning !== next.returns.meaning) return false;
-  for (const i of previous.inputs) {
-    const now = next.inputs.find((n) => n.name === i.name);
-    if (now && now.meaning !== i.meaning) return false;
-  }
-  const old = new Map<string, string>();
-  const index = (steps: SiftStep[]): void => steps.forEach((s) => (old.set(s.id, s.text), index(s.steps)));
-  index(previous.steps);
-  const check = (steps: SiftStep[]): boolean => steps.every((s) => (!old.has(s.id) || old.get(s.id) === s.text) && check(s.steps));
-  return check(next.steps);
 }
 
 /** The AI-written parts of a unit, to tell whether an update changed any wording. */

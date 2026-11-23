@@ -17,6 +17,9 @@
       ],
       "@sift/eval": [
         "./eval/harness/src/index.ts"
+      ],
+      "@sift/server": [
+        "./packages/server/src/index.ts"
       ]
     }
   },

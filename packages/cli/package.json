@@ -15,6 +15,7 @@
     "@sift/eval": "0.1.0",
     "@sift/provider-claude-code": "0.1.0",
     "@sift/rules": "0.1.0",
+    "@sift/server": "0.1.0",
     "commander": "^15.1.0"
   }
 }

@@ -251,6 +251,17 @@ export interface ImpactResult {
   gaps: GapNote[];
 }
 
+/** `flow(route)`: what a route reaches. */
+export interface FlowResult {
+  route: string;
+  /** The units registered as the route's handler; `handlerKey` when the handler is an inline callback. */
+  handlers: { id: string; handlerKey?: string }[];
+  /** Units, declarations, and library calls reached, nearest first. Library calls carry their effects in `via.effects`. */
+  hits: QueryHit[];
+  /** Direct effects of each project unit reached (and of whole-unit handlers). */
+  effects: Record<string, Effect[]>;
+}
+
 const CONFIDENCE_ORDER: EdgeConfidence[] = ["resolved", "rule", "language-server", "name-match", "inferred"];
 
 export function weakest(a: EdgeConfidence, b: EdgeConfidence): EdgeConfidence {
@@ -498,6 +509,66 @@ export class CodeGraph {
     const touched = new Set([...ids, ...result.units.map((u) => u.id)]);
     result.gaps = [...ids.flatMap((id) => this.possibleCallers(id)), ...this.gapList.filter((g) => g.kind !== "unresolved-call" && touched.has(g.unit))];
     return result;
+  }
+
+  /** Every route node, sorted. */
+  routes(): string[] {
+    const ids = new Set<string>();
+    for (const id of this.outgoing.keys()) if (nodeKind(id) === "route") ids.add(id);
+    return [...ids].sort();
+  }
+
+  /**
+   * Routes matching a query: a route ID (`route:POST /transfers`), `POST /transfers`, or a path
+   * (`/transfers`, every method). Method names are matched without regard to case.
+   */
+  findRoutes(query: string): string[] {
+    const q = query.trim().replace(/^route:/, "");
+    const space = q.indexOf(" ");
+    const method = space > 0 ? q.slice(0, space).toUpperCase() : null;
+    const path = space > 0 ? q.slice(space + 1).trim() : q;
+    return this.routes().filter((id) => {
+      const [m, ...rest] = id.slice("route:".length).split(" ");
+      return rest.join(" ") === path && (method === null || m!.toUpperCase() === method);
+    });
+  }
+
+  /**
+   * What a route does (phase-2-design §1): its handlers, then every unit and library call reachable
+   * from them, nearest first, up to `depth` calls down. A handler that is an inline callback is
+   * followed only through the calls inside that callback.
+   */
+  flow(route: string, depth = 10): FlowResult {
+    const handlers = this.edgesFrom(route, "handles-route").map((e) => ({ id: e.to, ...(e.handlerKey ? { handlerKey: e.handlerKey } : {}) }));
+    const hits: QueryHit[] = [];
+    const seen = new Set<string>();
+    let frontier: { id: string; handlerKey?: string }[] = handlers;
+    for (const h of handlers) seen.add(h.handlerKey ? `${h.id}|${h.handlerKey}` : h.id);
+    for (let d = 1; d <= depth && frontier.length > 0; d++) {
+      const next: { id: string }[] = [];
+      for (const source of frontier) {
+        for (const hit of this.directCallees(source.id)) {
+          let via = hit.via;
+          if (source.handlerKey !== undefined) {
+            const key = source.handlerKey;
+            const sites = via.sites.filter((s) => s.stepKey !== undefined && within(s.stepKey, key));
+            if (sites.length === 0) continue;
+            via = { ...via, sites };
+          }
+          if (seen.has(hit.id)) continue;
+          seen.add(hit.id);
+          hits.push({ id: hit.id, via, parent: source.id, depth: d });
+          if (this.unitsById.has(hit.id)) next.push({ id: hit.id });
+        }
+      }
+      frontier = next;
+    }
+    const effects: Record<string, Effect[]> = {};
+    for (const id of [...handlers.filter((h) => !h.handlerKey).map((h) => h.id), ...hits.map((h) => h.id)]) {
+      const own = this.unitsById.has(id) ? this.effectsOf(id) : [];
+      if (own.length > 0) effects[id] = own;
+    }
+    return { route, handlers, hits, effects };
   }
 
   /**

@@ -3,55 +3,20 @@ import { dirname, extname, join, relative, resolve } from "node:path";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { Command, CommanderError } from "commander";
-import {
-  gitDiff,
-  initProject,
-  listSiftFiles,
-  loadProject,
-  loadRulePacks,
-  readSiftFile,
-  refreshGraph,
-  RuleSet,
-  SiftError,
-  siftPathFor,
-  generate,
-  isInSync,
-  syncStatus,
-  loadLocalOverrides,
-  loadModelMap,
-  Router,
-  TASKS,
-  TIERS,
-  type CodeGraph,
-  type Provider,
-  type LanguageAdapter,
-} from "@sift/core";
+import { initProject, SiftError, siftPathFor, TASKS, TIERS, Workspace, type Provider, type LanguageAdapter } from "@sift/core";
 import { typescriptAdapter } from "@sift/adapter-typescript";
 import { claudeCodeProvider } from "@sift/provider-claude-code";
+import { serve } from "@sift/server";
 import { DEFAULT_CONFIG, loadMatrix, renderMarkdown, runEval, writeResults, type MatrixConfig } from "@sift/eval";
 import { renderGenerateReport, renderModels, renderPlan, renderStatus } from "./generate-render.js";
-import { renderCallees, renderCallers, renderImpact } from "./graph-render.js";
+import { renderCallees, renderCallers, renderFlow, renderImpact } from "./graph-render.js";
 import { renderSift, renderStructure } from "./render.js";
 
 function toProjectPath(root: string, abs: string): string {
   return relative(root, abs).replace(/\\/g, "/");
 }
 
-/** Unit ID → "file#symbol" across every .sift file, so calls render as names. Unreadable files are skipped. */
-async function unitNameIndex(root: string): Promise<Map<string, string>> {
-  const names = new Map<string, string>();
-  for (const source of await listSiftFiles(root)) {
-    try {
-      const stored = await readSiftFile(root, source);
-      for (const u of stored?.file.units ?? []) names.set(u.id, `${source}#${u.symbol}`);
-    } catch {
-      // An invalid file elsewhere shouldn't stop showing this one; its calls render as unknown.
-    }
-  }
-  return names;
-}
-
-const ADAPTERS: LanguageAdapter[] = [typescriptAdapter];
+export const ADAPTERS: LanguageAdapter[] = [typescriptAdapter];
 
 function adapterFor(path: string): LanguageAdapter {
   const ext = extname(path).toLowerCase();
@@ -89,15 +54,22 @@ export interface CliDeps {
   state?: { exitCode: number };
 }
 
-function providerFor(name: string, deps: CliDeps): Provider {
+export function providerFor(name: string, deps: Pick<CliDeps, "provider">): Provider {
   if (deps.provider) return deps.provider;
   if (name === "claude-code") return claudeCodeProvider;
   throw new SiftError("CONFIG_INVALID", `Unknown provider "${name}" in sift.config.yaml. Available: claude-code.`);
 }
 
-async function routerFor(root: string, provider: string, config: Parameters<typeof generate>[0]["config"]): Promise<{ router: Router; local: boolean }> {
-  const local = await loadLocalOverrides(root);
-  return { router: new Router(await loadModelMap(provider), config, local), local: local !== null };
+/** Open the project containing `cwd` as a workspace, with the built-in adapters and rule packs. */
+export function openWorkspace(cwd: string, deps: Pick<CliDeps, "provider"> = {}, options: { fullHash?: boolean; withProvider?: boolean } = {}): Promise<Workspace> {
+  return Workspace.open({
+    cwd,
+    adapters: ADAPTERS,
+    builtinRulesDir: builtinRulesDir(),
+    // The project's config names the provider.
+    ...(options.withProvider === false ? {} : { provider: (config) => providerFor(config.provider, deps) }),
+    ...(options.fullHash ? { fullHash: true } : {}),
+  });
 }
 
 export function buildProgram(io: CliIO = processIO, deps: CliDeps = {}): Command {
@@ -110,6 +82,10 @@ export function buildProgram(io: CliIO = processIO, deps: CliDeps = {}): Command
     .configureOutput({ writeOut: io.out, writeErr: io.err })
     .exitOverride()
     .showHelpAfterError();
+
+  /** A workspace for read-only commands: no AI provider needed. */
+  const reader = (cmd: Command, opts: { fullHash?: boolean } = {}) =>
+    openWorkspace(cwdOf(cmd), deps, { withProvider: false, fullHash: opts.fullHash === true || process.env.SIFT_FULL_HASH === "1" });
 
   program
     .command("init")
@@ -134,54 +110,41 @@ export function buildProgram(io: CliIO = processIO, deps: CliDeps = {}): Command
     .option("--json", "print raw JSON instead of the readable outline")
     .action(async (target: string, opts: { structure?: boolean; json?: boolean }, cmd: Command) => {
       const cwd = cwdOf(cmd);
-      const project = await loadProject(cwd);
+      const workspace = await reader(cmd);
       const hash = target.indexOf("#");
       const filePart = hash >= 0 ? target.slice(0, hash) : target;
       const symbol = hash >= 0 ? target.slice(hash + 1) : undefined;
-      const abs = resolve(cwd, filePart);
+      const sourcePath = toProjectPath(workspace.root, resolve(cwd, filePart));
+      adapterFor(sourcePath);
 
       if (!opts.structure) {
-        const sourcePath = toProjectPath(project.root, abs);
-        const stored = await readSiftFile(project.root, sourcePath);
-        if (!stored) {
+        // Shown from the .sift file alone: it reads the same with or without the source.
+        const file = await workspace.readSift(sourcePath);
+        if (!file) {
           throw new SiftError(
             "SOURCE_NOT_FOUND",
             `${sourcePath} has no description yet (${siftPathFor(sourcePath)} does not exist). Run "sift generate ${sourcePath}" to create it.`,
           );
         }
-        const units = symbol === undefined ? stored.file.units : stored.file.units.filter((u) => u.symbol === symbol);
+        const units = symbol === undefined ? file.units : file.units.filter((u) => u.symbol === symbol);
         if (symbol !== undefined && units.length === 0) {
-          throw new SiftError(
-            "SOURCE_NOT_FOUND",
-            `No unit named "${symbol}" in ${siftPathFor(sourcePath)}.`,
-            stored.file.units.map((u) => `available: ${u.symbol}`),
-          );
+          throw new SiftError("SOURCE_NOT_FOUND", `No unit named "${symbol}" in ${siftPathFor(sourcePath)}.`, file.units.map((u) => `available: ${u.symbol}`));
         }
         if (opts.json) {
-          io.out(JSON.stringify(symbol === undefined ? stored.file : { ...stored.file, units }, null, 2));
+          io.out(JSON.stringify(symbol === undefined ? file : { ...file, units }, null, 2));
           return;
         }
-        io.out(renderSift(stored.file, units, await unitNameIndex(project.root)));
+        const names = new Map([...(await workspace.unitIndex())].map(([id, { source, unit }]) => [id, `${source}#${unit.symbol}`]));
+        io.out(renderSift(file, units, names));
         return;
       }
 
-      const adapterProject = await adapterFor(abs).openProject(project.root, [abs], {
-        liteMaxStatements: project.config.lite.maxStatements,
-      });
-      try {
-        const extraction = adapterProject.extractFile(abs);
-        const units = symbol === undefined ? extraction.units : extraction.units.filter((u) => u.symbol === symbol);
-        if (symbol !== undefined && units.length === 0) {
-          throw new SiftError(
-            "SOURCE_NOT_FOUND",
-            `No unit named "${symbol}" in ${extraction.path}.`,
-            extraction.units.map((u) => `available: ${u.symbol}`),
-          );
-        }
-        io.out(opts.json ? JSON.stringify(symbol === undefined ? extraction : { ...extraction, units }, null, 2) : renderStructure(extraction, units));
-      } finally {
-        adapterProject.dispose();
+      const extraction = await workspace.extraction(sourcePath);
+      const units = symbol === undefined ? extraction.units : extraction.units.filter((u) => u.symbol === symbol);
+      if (symbol !== undefined && units.length === 0) {
+        throw new SiftError("SOURCE_NOT_FOUND", `No unit named "${symbol}" in ${extraction.path}.`, extraction.units.map((u) => `available: ${u.symbol}`));
       }
+      io.out(opts.json ? JSON.stringify(symbol === undefined ? extraction : { ...extraction, units }, null, 2) : renderStructure(extraction, units));
     });
 
   const graphOptions = (cmd: Command) =>
@@ -195,11 +158,10 @@ export function buildProgram(io: CliIO = processIO, deps: CliDeps = {}): Command
       .description("List units that call a symbol (file#Symbol, Class.method, or method), with edge confidence")
       .option("-d, --depth <n>", "follow callers this many levels up", "1"),
   ).action(async (query: string, opts: GraphOpts & { depth: string }, cmd: Command) => {
-    const graph = await openGraph(cmd, opts);
-    const id = resolveSymbol(graph, query);
-    const hits = graph.callers(id, depthOf(opts.depth));
-    const gaps = graph.possibleCallers(id);
-    io.out(opts.json ? JSON.stringify({ subject: id, callers: hits, possibleCallers: gaps }, null, 2) : renderCallers(graph, id, hits, gaps));
+    const workspace = await reader(cmd, opts);
+    const result = await workspace.callers(query, depthOf(opts.depth));
+    const graph = await workspace.graph();
+    io.out(opts.json ? JSON.stringify(result, null, 2) : renderCallers(graph, result.subject, result.callers, result.possibleCallers));
   });
 
   graphOptions(
@@ -208,11 +170,10 @@ export function buildProgram(io: CliIO = processIO, deps: CliDeps = {}): Command
       .description("List the units and library calls a symbol makes, with their effects")
       .option("-d, --depth <n>", "follow calls this many levels down", "1"),
   ).action(async (query: string, opts: GraphOpts & { depth: string }, cmd: Command) => {
-    const graph = await openGraph(cmd, opts);
-    const id = resolveSymbol(graph, query);
-    const hits = graph.callees(id, depthOf(opts.depth));
-    const gaps = graph.gapsIn(id);
-    io.out(opts.json ? JSON.stringify({ subject: id, effects: graph.effectsOf(id, { propagated: true }), callees: hits, unresolved: gaps }, null, 2) : renderCallees(graph, id, hits, gaps));
+    const workspace = await reader(cmd, opts);
+    const result = await workspace.callees(query, depthOf(opts.depth));
+    const graph = await workspace.graph();
+    io.out(opts.json ? JSON.stringify(result, null, 2) : renderCallees(graph, result.subject, result.callees, result.unresolved));
   });
 
   graphOptions(
@@ -224,31 +185,36 @@ export function buildProgram(io: CliIO = processIO, deps: CliDeps = {}): Command
     if (queries.length === 0 && opts.diff === undefined) {
       throw new SiftError("SOURCE_NOT_FOUND", "Name at least one symbol, or use --diff <ref>.");
     }
-    const graph = await openGraph(cmd, opts);
-    const subjects = queries.map((q) => resolveSymbol(graph, q));
-    const notes: string[] = [];
-    if (opts.diff !== undefined) {
-      const diff = await gitDiff(graph.root, opts.diff);
-      for (const [file, ranges] of [...diff.changed].sort(([a], [b]) => a.localeCompare(b))) {
-        if (!graph.files.includes(file)) continue;
-        const units = graph.unitsAt(file, ranges);
-        if (units.length === 0) notes.push(`${file}: changes are outside any unit (imports, types, or comments)`);
-        for (const u of units) if (!subjects.includes(u)) subjects.push(u);
-      }
-      for (const file of diff.deleted) if (ADAPTERS.some((a) => a.extensions.includes(extname(file).toLowerCase()))) notes.push(`${file}: deleted; its callers now show as unresolved calls`);
-      if (subjects.length === 0) {
-        io.out(opts.json ? JSON.stringify({ subjects, notes }, null, 2) : [`No units changed since ${opts.diff}.`, ...notes.map((n) => `  ${n}`)].join("\n"));
-        return;
-      }
+    const workspace = await reader(cmd, opts);
+    const { subjects, notes, ...result } = await workspace.impact(queries, opts.diff);
+    if (subjects.length === 0) {
+      io.out(opts.json ? JSON.stringify({ subjects, notes }, null, 2) : [`No units changed since ${opts.diff}.`, ...notes.map((n) => `  ${n}`)].join("\n"));
+      return;
     }
-    const result = graph.impact(subjects);
     if (opts.json) {
       io.out(JSON.stringify({ subjects, ...result, notes }, null, 2));
       return;
     }
+    const graph = await workspace.graph();
     const lines = [renderImpact(graph, subjects, result)];
     if (opts.diff !== undefined) lines.unshift(`Changed since ${opts.diff}: ${subjects.length} unit${subjects.length === 1 ? "" : "s"}`, ...subjects.map((s) => `  ${s}`), ...notes.map((n) => `  ${n}`), "");
     io.out(lines.join("\n"));
+  });
+
+  graphOptions(
+    program
+      .command("flow <route>")
+      .description('Show what a route does: its handler and every unit and library call it reaches, with effects (e.g. "POST /transfers" or "/transfers")')
+      .option("-d, --depth <n>", "follow calls this many levels down", "10"),
+  ).action(async (query: string, opts: GraphOpts & { depth: string }, cmd: Command) => {
+    const workspace = await reader(cmd, opts);
+    const flows = await workspace.flow(query, depthOf(opts.depth));
+    if (opts.json) {
+      io.out(JSON.stringify(flows, null, 2));
+      return;
+    }
+    const graph = await workspace.graph();
+    io.out(flows.map((f) => renderFlow(graph, f)).join("\n\n"));
   });
 
   program
@@ -259,12 +225,10 @@ export function buildProgram(io: CliIO = processIO, deps: CliDeps = {}): Command
     .option("--full-hash", "hash every file instead of trusting size and modification time")
     .option("--json", "print the run report as JSON")
     .action(async (paths: string[], opts: { dryRun?: boolean; force?: boolean; fullHash?: boolean; json?: boolean }, cmd: Command) => {
-      const project = await loadProject(cwdOf(cmd));
-      const loaded = await loadRulePacks(project.root, { builtinDir: builtinRulesDir() });
-      const provider = providerFor(project.config.provider, deps);
-      const { router, local } = await routerFor(project.root, provider.id, project.config);
+      const workspace = await openWorkspace(cwdOf(cmd), deps);
+      const provider = workspace.provider!;
       const cwd = resolve(cwdOf(cmd));
-      const projectPaths = paths.map((p) => toProjectPath(project.root, resolve(cwd, p)));
+      const projectPaths = paths.map((p) => toProjectPath(workspace.root, resolve(cwd, p)));
 
       if (!opts.dryRun && !opts.json) {
         io.out(
@@ -272,30 +236,26 @@ export function buildProgram(io: CliIO = processIO, deps: CliDeps = {}): Command
             ? `Using ${provider.id}; code stays on this machine.`
             : `Using ${provider.id}: the code of each unit is sent to Anthropic through Claude Code, on your own login.`,
         );
-        if (local) io.out("Personal model overrides from .sift/models.local.yaml are in use.");
+        if ((await workspace.router()).localOverrides) io.out("Personal model overrides from .sift/models.local.yaml are in use.");
       }
-      const report = await generate({
-        root: project.root,
-        config: project.config,
-        adapters: ADAPTERS,
-        rules: new RuleSet(loaded.packs),
-        provider,
-        router,
+      const report = await workspace.generate({
         paths: projectPaths,
         force: opts.force === true,
         dryRun: opts.dryRun === true,
         fullHash: opts.fullHash === true || process.env.SIFT_FULL_HASH === "1",
-        onEvent: opts.json
-          ? undefined
-          : (e) => {
-              if (e.type === "start") io.out(`Describing or updating ${e.units} unit${e.units === 1 ? "" : "s"} in ${e.files} file${e.files === 1 ? "" : "s"}…`);
-              else if (e.type === "described") {
-                const outcome = e.action === "context-check" ? (e.changed ? "reworded" : "no change needed") : e.action === "update" && !e.changed ? "no change needed" : "";
-                const notes = [outcome, e.attempts > 1 ? "after a retry" : "", e.stale ? "marked stale" : ""].filter(Boolean).join(", ");
-                io.out(`  ✓ ${e.unit}  ${e.task} · ${e.model} · ${(e.durationMs / 1000).toFixed(1)}s${notes ? ` · ${notes}` : ""}`);
-              } else if (e.type === "failed") io.out(`  ✗ ${e.unit}: ${e.reason}`);
-              else io.out(`  ! ${e.model} is used instead of the ${e.from} tier: ${e.reason}`);
-            },
+        ...(opts.json
+          ? {}
+          : {
+              onEvent: (e) => {
+                if (e.type === "start") io.out(`Describing or updating ${e.units} unit${e.units === 1 ? "" : "s"} in ${e.files} file${e.files === 1 ? "" : "s"}…`);
+                else if (e.type === "described") {
+                  const outcome = e.action === "context-check" ? (e.changed ? "reworded" : "no change needed") : e.action === "update" && !e.changed ? "no change needed" : "";
+                  const notes = [outcome, e.attempts > 1 ? "after a retry" : "", e.stale ? "marked stale" : ""].filter(Boolean).join(", ");
+                  io.out(`  ✓ ${e.unit}  ${e.task} · ${e.model} · ${(e.durationMs / 1000).toFixed(1)}s${notes ? ` · ${notes}` : ""}`);
+                } else if (e.type === "failed") io.out(`  ✗ ${e.unit}: ${e.reason}`);
+                else io.out(`  ! ${e.model} is used instead of the ${e.from} tier: ${e.reason}`);
+              },
+            }),
       });
       if (opts.json) io.out(JSON.stringify(report, null, 2));
       else io.out(opts.dryRun ? renderPlan(report) : renderGenerateReport(report));
@@ -303,12 +263,10 @@ export function buildProgram(io: CliIO = processIO, deps: CliDeps = {}): Command
     });
 
   const statusAction = (check: boolean) => async (opts: { json?: boolean; fullHash?: boolean }, cmd: Command) => {
-    const project = await loadProject(cwdOf(cmd));
-    const loaded = await loadRulePacks(project.root, { builtinDir: builtinRulesDir() });
+    const workspace = await reader(cmd);
     // In CI a fresh checkout's modification times say nothing, so check hashes every file there (design §5.1).
     const fullHash = opts.fullHash === true || process.env.SIFT_FULL_HASH === "1" || (check && Boolean(process.env.CI));
-    const report = await syncStatus({ root: project.root, config: project.config, adapters: ADAPTERS, rules: new RuleSet(loaded.packs), fullHash });
-    const inSync = isInSync(report);
+    const { inSync, ...report } = await workspace.status({ fullHash });
     io.out(opts.json ? JSON.stringify({ inSync, ...report }, null, 2) : renderStatus(report, inSync));
     if (check && !inSync && deps.state) deps.state.exitCode = EXIT.problems;
   };
@@ -328,15 +286,63 @@ export function buildProgram(io: CliIO = processIO, deps: CliDeps = {}): Command
     .action(statusAction(true));
 
   program
+    .command("verify <targets...>")
+    .description("Mark descriptions as checked by a person: units (file#Symbol, Class.method) or whole files. Only descriptions that match the current code can be verified.")
+    .option("--json", "print raw JSON")
+    .action(async (targets: string[], opts: { json?: boolean }, cmd: Command) => {
+      const workspace = await reader(cmd);
+      const cwd = resolve(cwdOf(cmd));
+      // A target that is a path on disk is a source file; anything else is a symbol.
+      const resolved = targets.map((t) => (!t.includes("#") && existsSync(resolve(cwd, t)) ? toProjectPath(workspace.root, resolve(cwd, t)) : t));
+      const result = await workspace.verify(resolved);
+      if (opts.json) io.out(JSON.stringify(result, null, 2));
+      else {
+        const out: string[] = [];
+        if (result.verified.length > 0) out.push(`Verified (${result.verified.length}):`, ...result.verified.map((u) => `  ✓ ${u}`));
+        if (result.refused.length > 0) out.push(`Not verified (${result.refused.length}):`, ...result.refused.map((r) => `  ✗ ${r.unit}: ${r.reason}`));
+        if (result.written.length > 0) out.push("", `Wrote ${result.written.length} .sift file${result.written.length === 1 ? "" : "s"}.`);
+        io.out(out.join("\n"));
+      }
+      if (result.refused.length > 0 && deps.state) deps.state.exitCode = EXIT.problems;
+    });
+
+  program
+    .command("migrate")
+    .description("Rewrite every .sift file at the current schema version, keeping its text (files are otherwise upgraded only when they need it)")
+    .option("--json", "print raw JSON")
+    .action(async (opts: { json?: boolean }, cmd: Command) => {
+      const workspace = await reader(cmd);
+      const result = await workspace.migrate();
+      if (opts.json) io.out(JSON.stringify(result, null, 2));
+      else {
+        const out = result.upgraded.length > 0 ? [`Upgraded ${result.upgraded.length} .sift file${result.upgraded.length === 1 ? "" : "s"}:`, ...result.upgraded.map((f) => `  ${f}`)] : ["Every .sift file is already at the current schema version."];
+        for (const u of result.unreadable) out.push(`  ✗ ${u.file}: ${u.message}`);
+        io.out(out.join("\n"));
+      }
+      if (result.unreadable.length > 0 && deps.state) deps.state.exitCode = EXIT.problems;
+    });
+
+  program
+    .command("serve")
+    .description("Serve this project's descriptions and code graph over JSON-RPC on stdin and stdout, for editor extensions")
+    .action(async (_opts: unknown, cmd: Command) => {
+      // stdout carries the protocol from here on; anything else the server says goes to stderr.
+      const workspace = await openWorkspace(cwdOf(cmd), deps);
+      const { closed } = serve({ workspace, input: process.stdin, output: process.stdout, serverVersion: VERSION });
+      io.err(`sift serve: ${workspace.root}`);
+      await closed;
+    });
+
+  program
     .command("models")
     .description("Show which model each task uses: task → tier → model, with overrides")
     .option("--json", "print raw JSON")
     .action(async (opts: { json?: boolean }, cmd: Command) => {
-      const project = await loadProject(cwdOf(cmd));
-      const providerId = deps.provider?.id ?? project.config.provider;
-      const { router, local } = await routerFor(project.root, providerId, project.config);
+      const workspace = await reader(cmd);
+      const providerId = deps.provider?.id ?? workspace.config.provider;
+      const { router, localOverrides } = await workspace.router(providerId);
       const routes = TASKS.map((t) => router.route(t));
-      io.out(opts.json ? JSON.stringify({ provider: providerId, localOverrides: local, routes }, null, 2) : renderModels(providerId, routes, local));
+      io.out(opts.json ? JSON.stringify({ provider: providerId, localOverrides, routes }, null, 2) : renderModels(providerId, routes, localOverrides));
     });
 
   program
@@ -429,37 +435,8 @@ function parseTiers(values: string[]): MatrixConfig["tasks"] {
 }
 
 /** The built-in rule packs shipped in @sift/rules. */
-function builtinRulesDir(): string {
+export function builtinRulesDir(): string {
   return join(dirname(createRequire(import.meta.url).resolve("@sift/rules/package.json")), "packs");
-}
-
-/** Load the project and its rule packs, and bring the code graph up to date (design §12: queries never see stale data). */
-async function openGraph(cmd: Command, opts: GraphOpts): Promise<CodeGraph & { root: string }> {
-  const project = await loadProject(cwdOf(cmd));
-  const loaded = await loadRulePacks(project.root, { builtinDir: builtinRulesDir() });
-  const { graph } = await refreshGraph({
-    root: project.root,
-    config: project.config,
-    adapters: ADAPTERS,
-    rules: new RuleSet(loaded.packs),
-    fullHash: opts.fullHash === true || process.env.SIFT_FULL_HASH === "1",
-  });
-  return Object.assign(graph, { root: project.root });
-}
-
-function resolveSymbol(graph: CodeGraph, query: string): string {
-  const matches = graph.find(query);
-  if (matches.length === 1) return matches[0]!;
-  if (matches.length > 1) {
-    throw new SiftError("SOURCE_NOT_FOUND", `"${query}" matches ${matches.length} symbols; use one of these names:`, matches);
-  }
-  const lower = query.toLowerCase().split("#").pop()!;
-  const similar = graph.units().map((u) => u.id).filter((id) => id.toLowerCase().includes(lower)).sort().slice(0, 10);
-  throw new SiftError(
-    "SOURCE_NOT_FOUND",
-    `No unit or symbol named "${query}" in the files Sift reads (sift.config.yaml include/exclude).`,
-    similar.map((id) => `similar: ${id}`),
-  );
 }
 
 function depthOf(value: string): number {

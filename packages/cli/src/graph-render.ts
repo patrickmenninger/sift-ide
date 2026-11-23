@@ -1,4 +1,4 @@
-import type { CodeGraph, GapNote, ImpactResult, QueryHit } from "@sift/core";
+import type { CodeGraph, FlowResult, GapNote, ImpactResult, QueryHit } from "@sift/core";
 
 /** Short readable name for a graph node. */
 export function nodeName(graph: CodeGraph, id: string): string {
@@ -106,6 +106,25 @@ export function renderImpact(graph: CodeGraph, subjects: string[], result: Impac
   if (other.length > 0) {
     out.push("", "  Registrations Sift could not read (routes or events may be missing):");
     for (const g of other) out.push(`    ${g.kind}: ${oneLine(g.expression)}  ${g.file}:${g.site.range.start.line}`);
+  }
+  return out.join("\n");
+}
+
+export function renderFlow(graph: CodeGraph, flow: FlowResult): string {
+  const out = [`Flow of ${flow.route.slice("route:".length)}`];
+  if (flow.handlers.length === 0) out.push("  (no handler found)");
+  for (const h of flow.handlers) {
+    const effects = flow.effects[h.id] ?? [];
+    out.push(`  handled by ${nodeName(graph, h.id)}${h.handlerKey ? ` (inline callback at ${h.handlerKey})` : ""}  ${fileOf(h.id)}${effects.length > 0 ? `  [${effects.join(", ")}]` : ""}`);
+    out.push(
+      ...tree(flow.hits, h.id, (hit) => {
+        const kind = graph.kindOf(hit.id);
+        const effects = kind === "external" ? (hit.via.effects ?? []) : (flow.effects[hit.id] ?? []);
+        const where = kind === "unit" || kind === "declaration" ? `  ${fileOf(hit.id)}` : "";
+        const label = kind === "declaration" ? " (declaration)" : kind === "event" ? " (no listeners)" : "";
+        return `  ${nodeName(graph, hit.id)}${label}${where} · ${describeVia(graph, hit)}${effects.length > 0 ? `  [${effects.join(", ")}]` : ""}`;
+      }),
+    );
   }
   return out.join("\n");
 }
