@@ -7,6 +7,7 @@ import { initProject, SiftError, siftPathFor, TASKS, TIERS, Workspace, type Prov
 import { typescriptAdapter } from "@sift/adapter-typescript";
 import { claudeCodeProvider } from "@sift/provider-claude-code";
 import { serve } from "@sift/server";
+import { serveMcp } from "@sift/mcp";
 import { DEFAULT_CONFIG, loadMatrix, renderMarkdown, runEval, writeResults, type MatrixConfig } from "@sift/eval";
 import { renderGenerateReport, renderModels, renderPlan, renderStatus } from "./generate-render.js";
 import { renderCallees, renderCallers, renderFlow, renderImpact } from "./graph-render.js";
@@ -330,6 +331,20 @@ export function buildProgram(io: CliIO = processIO, deps: CliDeps = {}): Command
       const workspace = await openWorkspace(cwdOf(cmd), deps);
       const { closed } = serve({ workspace, input: process.stdin, output: process.stdout, serverVersion: VERSION });
       io.err(`sift serve: ${workspace.root}`);
+      await closed;
+    });
+
+  program
+    .command("mcp")
+    .description("Serve this project's descriptions, code graph, and impact analysis to AI coding agents as an MCP server on stdin and stdout")
+    .option("--root <dir>", "the project to serve (default: the current directory)")
+    .option("--allow-generate", "add the sift_generate tool, which spends your AI quota")
+    .action(async (opts: { root?: string; allowGenerate?: boolean }, cmd: Command) => {
+      // stdout carries the protocol from here on; anything else goes to stderr.
+      const allowGenerate = opts.allowGenerate === true;
+      const workspace = await openWorkspace(opts.root ? resolve(cwdOf(cmd), opts.root) : cwdOf(cmd), deps, { withProvider: allowGenerate });
+      const { closed } = await serveMcp({ workspace, allowGenerate, version: VERSION, input: process.stdin, output: process.stdout });
+      io.err(`sift mcp: ${workspace.root}${allowGenerate ? " (sift_generate allowed)" : ""}`);
       await closed;
     });
 

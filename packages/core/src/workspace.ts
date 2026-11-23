@@ -252,7 +252,20 @@ export class Workspace {
 
   /** A source file's logic: its `.sift` file with each unit's status and freshness. */
   async logicFile(source: string): Promise<LogicFile> {
-    const extraction = await this.extraction(source);
+    return (await this.logicFiles([source]))[0]!;
+  }
+
+  /** Several source files' logic, with one refresh. A path Sift does not read is an error. */
+  async logicFiles(sources: string[]): Promise<LogicFile[]> {
+    const extractions = await this.serial(async () => {
+      const { graph } = await this.refreshNow({});
+      for (const source of sources) if (!graph.files.includes(source)) throw this.notASourceFile(source);
+      return loadExtractions({ root: this.root, config: this.config, adapters: this.adapters }, graph, sources);
+    });
+    return Promise.all(sources.map((source) => this.toLogicFile(source, extractions.get(source)!)));
+  }
+
+  private async toLogicFile(source: string, extraction: FileExtraction): Promise<LogicFile> {
     const sift = await this.readSift(source);
     const extracted = new Map(extraction.units.map((u) => [u.symbol, u]));
     const units: LogicUnit[] = (sift?.units ?? []).map((unit) => {

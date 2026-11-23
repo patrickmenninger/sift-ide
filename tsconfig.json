@@ -17,6 +17,9 @@
       "path": "packages/server"
     },
     {
+      "path": "packages/mcp-server"
+    },
+    {
       "path": "packages/cli"
     }
   ]

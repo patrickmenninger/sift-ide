@@ -7,7 +7,7 @@ Sift reads your source code and writes a plain-language description of every fun
 - [Requirements](requirements.md)
 - [Phase 1 design](docs/design.md)
 
-> Sift is in early development (Phase 1: the command-line tool). It supports TypeScript and JavaScript. An MCP server and a VS Code extension come next.
+> Sift is in early development (Phase 2: the command-line tool and an MCP server for AI agents). It supports TypeScript and JavaScript. A VS Code extension comes next.
 
 ## What you need
 
@@ -144,6 +144,29 @@ Only descriptions that match the current code can be verified; `verify` says why
 You can edit summaries and step texts by hand and mark them as yours. Don't edit `calls`, `effects`, `covers`, or the hashes: Sift derives them from the code.
 
 **Schema versions.** `.sift` files written by Sift 0.1 are schema 0. A file moves to schema 1 only when it gets a schema 1 field (step `status`, `userEdited`, or a resolved warning), so upgrading Sift does not touch your files. `sift migrate` upgrades them all at once if you prefer one commit. Older versions of Sift refuse schema 1 files rather than misread them.
+
+## AI coding agents (MCP)
+
+`sift mcp` gives an AI coding agent the same answers as the commands above, as MCP tools: what a function does, who calls it, what a change affects, and what a route reaches. To add it to Claude Code, run this in your project's root (after `npm link`, so `sift` is on your PATH):
+
+```sh
+claude mcp add sift -- sift mcp
+```
+
+For another MCP client, configure the command `sift mcp --root <your project>` on stdio.
+
+| Tool | What it answers |
+|---|---|
+| `sift_describe` | What a unit or whole file does: summary, inputs, returns, steps with their calls, effects, warnings, and status. |
+| `sift_find` | Units whose name matches, with a one-line summary. |
+| `sift_callers` / `sift_callees` | Who calls a symbol, and what it calls, with effects and confidence. |
+| `sift_impact` | Units and routes a change to some symbols may affect, or `{ diff: "HEAD" }` for everything changed since a git ref. |
+| `sift_flow` | What a route does, down to the library calls; without a route, the list of routes. |
+| `sift_status` | Which descriptions no longer match the code. |
+
+Every tool only reads; none changes your code. Results reflect the files on disk, including the agent's own saved edits. A description that may not match the code starts with "Stale:", so the agent never takes an outdated description as current. Lists stop at 50 items and say what they left out. Each described file is also available as the resource `sift://file/<path>`.
+
+`sift mcp --allow-generate` adds `sift_generate`, which writes descriptions for new and changed code. It is off by default because it spends your AI quota.
 
 ## Editors
 

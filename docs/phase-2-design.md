@@ -162,6 +162,15 @@ Rules:
 - Resources: `sift://file/<path>` for each described file, so clients that browse resources can attach logic documents directly.
 - No tool edits code. Agents already do that; Sift's job here is to tell them what their change touches.
 
+**As built (M10)**, `packages/mcp-server` (`@sift/mcp`, `@modelcontextprotocol/sdk` 1.32.2, `zod` 4.6.7 for tool schemas):
+
+- `createMcpServer({ workspace, allowGenerate, version })` registers the tools; `serveMcp` runs it on stdio until stdin ends. `sift mcp` opens the workspace with a provider only when `--allow-generate` is given. Setup in the README is `claude mcp add sift -- sift mcp`, since Sift is not on npm yet (`npx` arrives with publishing, Phase 4).
+- Each tool returns a text rendering in `content` and the compact JSON in `structuredContent`. Neither has hashes, structure keys, or provenance. Calls are shown as `file#Symbol`, never unit IDs. Read-only tools carry `readOnlyHint`. The server's `instructions` tell the agent when to describe, when to check impact, and what "Stale:" means.
+- **Stale marking.** A unit is stale when its code changed (`freshness: code-changed`), when its code is gone (`not-in-code`), or when its status is `stale`. Each case has its own sentence starting with "Stale:". The sentence is set as `stale` and also starts `summary`, in the JSON and in the text, in `sift_describe`, `sift_find`, and the resources. Callee-summary drift (`contextChanged`) is reported only by `sift_status`, as in §4.
+- **Bounds.** Every list holds at most 50 items. `truncated` counts what each list left out, and the text says so. `sift_callers`/`sift_callees` default to depth 2 (maximum 10). `sift_flow` defaults to depth 10 (maximum 20): a route needs more than two levels to reach the database, and the 50-item cap still holds.
+- Beyond the table: `sift_describe` accepts a path, `file#Symbol`, a name, or a `u_` ID. `sift_find` falls back to a case-insensitive substring match when no name matches exactly. `sift_flow` without a route lists the routes. Sift errors (unknown symbol, no description yet) come back as tool errors (`isError`) with the same message and details as the CLI.
+- Core gained `Workspace.logicFiles(sources)`: several files' logic with one refresh, so `sift_find` does not refresh once per file.
+
 ## 6. VS Code Extension
 
 Activation: a workspace containing `.sift/` or `sift.config.yaml`. Without one, the command palette offers "Sift: Initialize".
