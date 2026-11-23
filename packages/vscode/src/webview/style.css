@@ -1,0 +1,334 @@
+/* The logic document, styled from VS Code's theme variables so it follows light, dark, and
+   high-contrast themes (phase-2-design §6.1). */
+
+body {
+  padding: 0;
+  margin: 0;
+  color: var(--vscode-foreground);
+  background: var(--vscode-editor-background);
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size);
+  line-height: 1.5;
+}
+
+.doc {
+  position: relative;
+  max-width: 920px;
+  padding: 12px 20px 48px;
+}
+
+.muted {
+  color: var(--vscode-descriptionForeground);
+}
+
+code {
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.92em;
+  color: var(--vscode-textPreformat-foreground);
+  background: var(--vscode-textPreformat-background, transparent);
+  padding: 0 3px;
+  border-radius: 3px;
+}
+
+button {
+  font: inherit;
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
+  border: 1px solid var(--vscode-button-border, transparent);
+  border-radius: 2px;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+button:hover {
+  background: var(--vscode-button-hoverBackground);
+}
+button.secondary {
+  color: var(--vscode-button-secondaryForeground);
+  background: var(--vscode-button-secondaryBackground);
+}
+button.secondary:hover {
+  background: var(--vscode-button-secondaryHoverBackground);
+}
+button.small {
+  padding: 0 8px;
+  font-size: 0.9em;
+}
+button:focus-visible,
+.step-line:focus-visible,
+a:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+a {
+  color: var(--vscode-textLink-foreground);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+.doc-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.doc-header h1 {
+  flex: 1;
+  margin: 0;
+  font-size: 1.1em;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.banner {
+  padding: 4px 10px;
+  margin: 6px 0;
+  border-left: 3px solid;
+  border-radius: 2px;
+}
+.banner.warning {
+  border-color: var(--vscode-editorWarning-foreground);
+  background: var(--vscode-inputValidation-warningBackground, transparent);
+}
+.banner.error {
+  border-color: var(--vscode-editorError-foreground);
+  background: var(--vscode-inputValidation-errorBackground, transparent);
+}
+
+/* ── Units ─────────────────────────────────────────────────────────────── */
+
+.unit {
+  border-top: 1px solid var(--vscode-panel-border, var(--vscode-widget-border, transparent));
+  padding: 6px 0 8px;
+}
+.unit.current > .unit-header {
+  background: var(--vscode-list-inactiveSelectionBackground);
+}
+.unit-header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.twisty {
+  background: none;
+  color: var(--vscode-foreground);
+  border: none;
+  padding: 0 2px;
+  width: 1.4em;
+}
+.twisty:hover {
+  background: var(--vscode-toolbar-hoverBackground);
+}
+.name {
+  font-family: var(--vscode-editor-font-family);
+  font-weight: 600;
+  color: var(--vscode-symbolIcon-methodForeground, var(--vscode-textLink-foreground));
+}
+.kind {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.9em;
+}
+.one-line {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--vscode-descriptionForeground);
+}
+.actions {
+  margin-left: auto;
+}
+
+.badge {
+  font-size: 0.8em;
+  padding: 0 6px;
+  border-radius: 8px;
+  border: 1px solid currentColor;
+  white-space: nowrap;
+}
+.badge.generated {
+  color: var(--vscode-descriptionForeground);
+}
+.badge.user-edited {
+  color: var(--vscode-charts-blue, var(--vscode-textLink-foreground));
+}
+.badge.verified {
+  color: var(--vscode-testing-iconPassed, var(--vscode-charts-green));
+}
+.badge.stale {
+  color: var(--vscode-editorWarning-foreground);
+}
+
+.unit-body {
+  padding-left: 1.6em;
+}
+/* Generated text is faint until a person verifies it (requirements §3.8). */
+.unit.faint .summary,
+.unit.faint .io dd,
+.unit.faint .step-line > .text {
+  opacity: 0.78;
+}
+.unit.faint .step.user-edited > .step-line > .text {
+  opacity: 1;
+}
+.unit.badge-stale .unit-body {
+  border-left: 2px dashed var(--vscode-editorWarning-foreground);
+  padding-left: calc(1.6em - 2px);
+}
+
+.summary {
+  margin: 4px 0 6px;
+}
+
+.io {
+  margin: 4px 0;
+}
+.io-row {
+  display: grid;
+  grid-template-columns: minmax(10em, max-content) 1fr;
+  gap: 12px;
+}
+.io dt {
+  white-space: nowrap;
+}
+.io dd {
+  margin: 0;
+}
+.io-name {
+  font-family: var(--vscode-editor-font-family);
+}
+.inferred {
+  margin-left: 4px;
+  font-size: 0.8em;
+  font-style: italic;
+  color: var(--vscode-descriptionForeground);
+}
+
+.effects {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 2px 0;
+}
+.effects.small {
+  margin: 0 0 0 6px;
+}
+.chip {
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.8em;
+  padding: 0 6px;
+  border-radius: 8px;
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+}
+
+/* ── Steps ─────────────────────────────────────────────────────────────── */
+
+.steps {
+  margin: 4px 0;
+  padding-left: 1.6em;
+}
+.steps .steps {
+  border-left: 1px solid var(--vscode-tree-indentGuidesStroke, var(--vscode-widget-border, transparent));
+  margin-left: 0.2em;
+}
+.step-line {
+  padding: 1px 4px;
+  border-radius: 2px;
+  cursor: default;
+}
+.step-line:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+.step.current > .step-line {
+  background: var(--vscode-editor-selectionHighlightBackground, var(--vscode-list-inactiveSelectionBackground));
+  outline: 1px solid var(--vscode-editor-selectionHighlightBorder, transparent);
+}
+.step-kind {
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.85em;
+  color: var(--vscode-symbolIcon-keywordForeground, var(--vscode-descriptionForeground));
+  margin-right: 6px;
+}
+.mark {
+  margin-left: 6px;
+  font-size: 0.8em;
+}
+.mark.edited {
+  color: var(--vscode-charts-blue, var(--vscode-textLink-foreground));
+}
+.mark.verified {
+  color: var(--vscode-testing-iconPassed, var(--vscode-charts-green));
+}
+.calls {
+  margin-left: 8px;
+  font-size: 0.85em;
+  color: var(--vscode-textLink-foreground);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+/* ── Warnings, kept visually apart ─────────────────────────────────────── */
+
+.warnings {
+  margin: 8px 0 2px;
+  padding: 4px 10px;
+  border-left: 3px solid var(--vscode-editorWarning-foreground);
+  background: var(--vscode-textBlockQuote-background);
+}
+.warning-kind {
+  font-weight: 600;
+  text-transform: capitalize;
+}
+.warning.resolved {
+  opacity: 0.7;
+}
+
+.undescribed {
+  border-top: 1px solid var(--vscode-panel-border, var(--vscode-widget-border, transparent));
+  padding-top: 6px;
+}
+.undescribed h2 {
+  font-size: 1em;
+  margin: 0;
+}
+.undescribed p {
+  margin: 2px 0;
+  font-family: var(--vscode-editor-font-family);
+  color: var(--vscode-descriptionForeground);
+}
+
+/* ── Hover card for a step's calls ─────────────────────────────────────── */
+
+.card {
+  position: absolute;
+  z-index: 10;
+  width: 320px;
+  max-width: calc(100% - 8px);
+  padding: 6px 10px;
+  color: var(--vscode-editorHoverWidget-foreground);
+  background: var(--vscode-editorHoverWidget-background);
+  border: 1px solid var(--vscode-editorHoverWidget-border);
+  border-radius: 3px;
+  box-shadow: 0 2px 8px var(--vscode-widget-shadow);
+}
+.card ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.card li + li {
+  margin-top: 6px;
+}
+.card p {
+  margin: 0;
+}
+.target-summary {
+  font-size: 0.92em;
+}

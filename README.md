@@ -181,6 +181,7 @@ code --install-extension packages/vscode/sift.vsix
 
 It starts Sift for each workspace folder with a `sift.config.yaml` (no `sift` on your PATH needed: the engine is bundled) and shows:
 
+- the **logic document** of a source file: **Sift: Open Logic** (`Ctrl+Alt+L`, or the book button in the editor title) opens it beside the code, and `.sift` files open as logic documents. Each function is a section with a status badge (Unverified, Edited, Verified, Stale), its summary, inputs and returns, effects, steps, and warnings. Hovering a step highlights its code; moving the cursor in the code marks the step that owns it. Ctrl+click (or F12) on a step follows its call to the callee's logic, with a picker when an interface has several implementations; Alt+click opens the callee's code; hovering the `→` on a step shows where its calls go, including library calls and their effects. **Verify** marks a description as checked by you;
 - the number of out-of-date or missing descriptions in the status bar, and a dot in the explorer on files whose logic is out of date or not described yet;
 - an **Out of Date** list in the Sift sidebar, grouped by reason;
 - **Callers** and **Callees** of the function at the cursor (editor context menu), with how each call was resolved and the calls Sift could not resolve;
@@ -251,7 +252,7 @@ Requires Node.js 20.12 or later.
 npm install
 npm run verify      # build (packages and the extension bundle), type-check (including tests), run tests
 npm run sift -- --help
-npm run test:vscode # extension integration tests in a downloaded VS Code (opens a window)
+npm run test:vscode # extension integration tests in a downloaded VS Code (opens a window; run `npm run build` first)
 npm run package:vscode
 ```
 

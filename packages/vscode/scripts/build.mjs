@@ -3,6 +3,7 @@
 //   dist/extension.cjs   the extension host side (CommonJS; `vscode` is provided by the editor)
 //   dist/server.mjs      `sift serve` with the engine, the TypeScript adapter, and the pinned
 //                        `typescript`, run as a child process with VS Code's own Node
+//   dist/webview.js/css  the logic document (Preact), loaded by the extension's webviews
 //   dist/lib.*.d.ts      TypeScript's default libraries, found next to the bundle
 //   prompts/ models/     read by the engine next to the bundle (`../prompts`, `../models`)
 //   rules/               the built-in rule packs
@@ -73,6 +74,19 @@ const server = {
   },
 };
 
+const webview = {
+  ...common,
+  entryPoints: { webview: join(pkg, "src", "webview", "main.tsx") },
+  outdir: join(pkg, "dist"),
+  platform: "browser",
+  target: "es2022",
+  format: "iife",
+  jsx: "automatic",
+  jsxImportSource: "preact",
+  // Types only: the webview takes no runtime code from the engine.
+  alias: { "@sift/core": join(pkg, "src", "core-runtime.ts") },
+};
+
 /** TypeScript's default library files: the adapter's program needs them to type the code. */
 async function copyTypeScriptLibs() {
   const lib = dirname(createRequire(join(packages, "adapter-typescript", "package.json")).resolve("typescript"));
@@ -98,8 +112,8 @@ await rm(join(pkg, "dist"), { recursive: true, force: true });
 await copyAssets();
 await copyTypeScriptLibs();
 if (watch) {
-  const contexts = await Promise.all([esbuild.context(extension), esbuild.context(server)]);
+  const contexts = await Promise.all([esbuild.context(extension), esbuild.context(server), esbuild.context(webview)]);
   await Promise.all(contexts.map((c) => c.watch()));
 } else {
-  await Promise.all([esbuild.build(extension), esbuild.build(server)]);
+  await Promise.all([esbuild.build(extension), esbuild.build(server), esbuild.build(webview)]);
 }
