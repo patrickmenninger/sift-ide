@@ -2,6 +2,20 @@
 
 All notable changes to Sift are recorded here. Versions follow the roadmap phases in [requirements.md](requirements.md): each phase ends with a minor release on `main`.
 
+## Unreleased — Phase 2
+
+### Added
+
+- **Workspace** (`@sift/core`): one long-lived engine behind the CLI and editors, with logic files and their freshness, step ↔ source ranges, the step at a source position, navigation targets for a step's calls, and change notifications.
+- **`sift flow <route>`**: what an HTTP route does, from its handler down to the library calls, with effects. A route registered as an inline callback is followed only through that callback.
+- **`sift verify`**: mark units or whole files as checked by a person; descriptions that don't match the current code are refused.
+- **`.sift` schema 1**: step-level `status` (`user-edited`, `verified`), a unit's `userEdited` fields, and `resolved` warnings. Sync protects exactly the wording a person wrote. Files stay at schema 0 until they need a schema 1 field; `sift migrate` upgrades them all at once.
+- **`sift serve`** and `@sift/server`: the workspace over JSON-RPC on stdio, with a typed client, for the VS Code extension.
+
+### Changed
+
+- Every CLI command runs through the workspace.
+
 ## 0.1.0 — Phase 1: Derivation Engine
 
 First release: a command-line tool that reads a TypeScript/JavaScript project and keeps `.sift` files — natural-language descriptions of every function — in sync with the code. Design: [docs/design.md](docs/design.md).

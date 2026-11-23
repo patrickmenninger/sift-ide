@@ -113,6 +113,7 @@ sift callers transferFunds              # who calls it (-d 3 for three levels up
 sift callees AccountService.transferFunds   # what it calls, with effects
 sift impact PrismaAccountRepository.getAccount   # units and HTTP routes affected by a change
 sift impact --diff main                 # everything affected by your branch's changes
+sift flow "POST /transfers"             # what a route does: handler, units, library calls, effects
 sift show --structure src/app.ts        # what the language adapter extracted
 ```
 
@@ -129,7 +130,24 @@ Each source file `src/x.ts` gets `.sift/src/x.ts.sift`, a YAML file with one ent
 | `verified` | A person checked it. Any AI change returns it to `generated`. |
 | `stale` | Incomplete, or waiting for review. `sift status` lists these. |
 
-You can edit summaries and step texts by hand and set `status: user-edited`. Don't edit `calls`, `effects`, `covers`, or the hashes: Sift derives them from the code.
+Wording a person wrote can also be marked piece by piece: a step gets `status: user-edited`, and the summary, returns, or an input meaning are listed under the unit's `userEdited` (for example `userEdited: [summary, inputs.amount]`). Sync then protects only those pieces; the rest of the unit is updated as usual.
+
+Once you have read a description and agree with it, mark it checked:
+
+```sh
+sift verify AccountService.transferFunds    # one unit
+sift verify src/accounts/account-service.ts # every unit in a file
+```
+
+Only descriptions that match the current code can be verified; `verify` says why it refused the others.
+
+You can edit summaries and step texts by hand and mark them as yours. Don't edit `calls`, `effects`, `covers`, or the hashes: Sift derives them from the code.
+
+**Schema versions.** `.sift` files written by Sift 0.1 are schema 0. A file moves to schema 1 only when it gets a schema 1 field (step `status`, `userEdited`, or a resolved warning), so upgrading Sift does not touch your files. `sift migrate` upgrades them all at once if you prefer one commit. Older versions of Sift refuse schema 1 files rather than misread them.
+
+## Editors
+
+`sift serve` runs Sift's engine as a JSON-RPC server on stdin and stdout. The VS Code extension (in progress) starts it for you; the protocol is defined in `packages/server/src/protocol.ts`.
 
 ## Configuration
 
@@ -194,10 +212,11 @@ npm run sift -- --help
 
 | Package | Purpose |
 |---|---|
-| `packages/core` | Language- and provider-independent engine: config, schema, sync pipeline, graph, prompts |
+| `packages/core` | Language- and provider-independent engine: config, schema, sync pipeline, graph, prompts, and the `Workspace` every front end uses |
 | `packages/adapter-typescript` | TypeScript/JavaScript language adapter |
 | `packages/provider-claude-code` | AI provider using `claude -p` |
 | `packages/rules` | Built-in framework rule packs |
+| `packages/server` | `sift serve`: the workspace over JSON-RPC, with a typed client for editors |
 | `packages/cli` | The `sift` command |
 | `eval/harness` | Evaluation harness behind `sift eval` |
 
