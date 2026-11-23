@@ -20,6 +20,9 @@
       ],
       "@sift/server": [
         "./packages/server/src/index.ts"
+      ],
+      "@sift/mcp": [
+        "./packages/mcp-server/src/index.ts"
       ]
     }
   },

@@ -11,6 +11,7 @@ All notable changes to Sift are recorded here. Versions follow the roadmap phase
 - **`sift verify`**: mark units or whole files as checked by a person; descriptions that don't match the current code are refused.
 - **`.sift` schema 1**: step-level `status` (`user-edited`, `verified`), a unit's `userEdited` fields, and `resolved` warnings. Sync protects exactly the wording a person wrote. Files stay at schema 0 until they need a schema 1 field; `sift migrate` upgrades them all at once.
 - **`sift serve`** and `@sift/server`: the workspace over JSON-RPC on stdio, with a typed client, for the VS Code extension.
+- **`sift mcp`** and `@sift/mcp`: an MCP server for AI coding agents with `sift_describe`, `sift_find`, `sift_callers`, `sift_callees`, `sift_impact`, `sift_flow`, and `sift_status`, plus `sift://file/<path>` resources. Read-only; stale descriptions are always marked; lists are capped at 50 items. `--allow-generate` adds `sift_generate`.
 
 ### Changed
 

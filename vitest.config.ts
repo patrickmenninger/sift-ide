@@ -11,6 +11,7 @@ export default defineConfig({
       "@sift/adapter-typescript": pkg("adapter-typescript"),
       "@sift/provider-claude-code": pkg("provider-claude-code"),
       "@sift/server": pkg("server"),
+      "@sift/mcp": pkg("mcp-server"),
       "@sift/eval": fileURLToPath(new URL("./eval/harness/src/index.ts", import.meta.url)),
     },
   },
