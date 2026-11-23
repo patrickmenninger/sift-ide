@@ -4,6 +4,8 @@ import { join } from "node:path";
 import * as vscode from "vscode";
 import type { GenerateEvent, SourceRange } from "@sift/core";
 import { planSummary, resultSummary } from "./generate-summary.js";
+import { LogicDocuments, type LogicHost, type LogicView } from "./logic-editor.js";
+import { sourceOfLogic } from "./logic-model.js";
 import { Project } from "./project.js";
 import type { ServerChild } from "./server-process.js";
 import { CallTreeProvider, OutOfDateDecorations, SiftStatusBar, StatusTreeProvider, type ProjectRegistry } from "./views.js";
@@ -15,7 +17,7 @@ const CONFIG_FILE = "sift.config.yaml";
  * sift.config.yaml, a status bar item and explorer decorations for out-of-date logic, the
  * out-of-date, callers, and callees views, and generating with an estimate first.
  */
-class Sift implements ProjectRegistry, vscode.Disposable {
+class Sift implements ProjectRegistry, LogicHost, vscode.Disposable {
   private readonly byFolder = new Map<string, Project>();
   private readonly changeEmitter = new vscode.EventEmitter<void>();
   readonly onDidChange = this.changeEmitter.event;
@@ -25,12 +27,17 @@ class Sift implements ProjectRegistry, vscode.Disposable {
   private readonly callees = new CallTreeProvider("callees");
   private readonly decorations = new OutOfDateDecorations(this);
   private readonly statusBar = new SiftStatusBar(this);
+  readonly logic = new LogicDocuments(this);
   private readonly disposables: vscode.Disposable[] = [];
   /** Files the user said "not now" to under `sift.updateOnSave: ask`, until their logic is current again. */
   private readonly declined = new Set<string>();
   private generating = false;
 
   constructor(private readonly context: vscode.ExtensionContext) {}
+
+  get extensionUri(): vscode.Uri {
+    return this.context.extensionUri;
+  }
 
   get projects(): readonly Project[] {
     return [...this.byFolder.values()];
@@ -47,6 +54,8 @@ class Sift implements ProjectRegistry, vscode.Disposable {
       vscode.window.registerTreeDataProvider("sift.callers", this.callers),
       vscode.window.registerTreeDataProvider("sift.callees", this.callees),
       vscode.window.registerFileDecorationProvider(this.decorations),
+      this.logic,
+      this.logic.register(),
       vscode.workspace.onDidChangeWorkspaceFolders(() => this.syncFolders()),
       vscode.workspace.onDidSaveTextDocument((doc) => this.onSaved(doc)),
     );
@@ -79,6 +88,8 @@ class Sift implements ProjectRegistry, vscode.Disposable {
     command("sift.showCallees", (uri?: vscode.Uri) => this.showCalls("callees", uri));
     command("sift.showCallersOfNode", (node?: { project: Project; hit?: { id: string }; id?: string }) => this.showCallsOfNode("callers", node));
     command("sift.showCalleesOfNode", (node?: { project: Project; hit?: { id: string }; id?: string }) => this.showCallsOfNode("callees", node));
+    command("sift.openLogic", (uri?: vscode.Uri) => this.openLogic(uri));
+    command("sift.openSourceOfLogic", () => this.openSourceOfLogic());
     command("sift.openUnit", (root: string, ref: string) => this.openUnit(root, ref));
     command("sift.openRange", (root: string, file: string, range: SourceRange) => this.openRange(root, file, range));
     command("sift.openCallSite", (node?: { project: Project; hit: { via: { file: string; sites: { range: SourceRange }[] } } }) => {
@@ -149,7 +160,7 @@ class Sift implements ProjectRegistry, vscode.Disposable {
     );
   }
 
-  private projectFor(uri: vscode.Uri): Project | null {
+  projectFor(uri: vscode.Uri): Project | null {
     for (const project of this.projects) if (project.relative(uri.fsPath) !== null) return project;
     return null;
   }
@@ -334,6 +345,32 @@ class Sift implements ProjectRegistry, vscode.Disposable {
     await vscode.commands.executeCommand(`sift.${direction}.focus`);
   }
 
+  // ── Logic documents (phase-2-design §6.1) ───────────────────────────────────────────────
+
+  describe(uri: vscode.Uri): Promise<void> {
+    return this.generateFor(uri, "file");
+  }
+
+  /** Open the logic of a source file beside it. */
+  private async openLogic(uri?: vscode.Uri): Promise<void> {
+    const target = uri ?? vscode.window.activeTextEditor?.document.uri;
+    const { project, path } = this.requireProject(target);
+    const source = sourceOfLogic(path);
+    if (source !== null) {
+      // Already a .sift file: show it as a logic document.
+      await this.logic.open(project, source, { viewColumn: vscode.ViewColumn.Active });
+      return;
+    }
+    await this.logic.open(project, path, { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true });
+  }
+
+  /** From a logic document, open its source file beside it. */
+  private async openSourceOfLogic(): Promise<void> {
+    const active = this.logic.activeSource();
+    if (!active) throw new UserError("Open a logic document first.");
+    await vscode.window.showTextDocument(vscode.Uri.joinPath(vscode.Uri.file(active.project.root), active.source), { viewColumn: vscode.ViewColumn.Beside });
+  }
+
   // ── Navigation ───────────────────────────────────────────────────────────────────────────
 
   private async openUnit(root: string, ref: string): Promise<void> {
@@ -381,7 +418,7 @@ class Sift implements ProjectRegistry, vscode.Disposable {
 
   // ── Errors ───────────────────────────────────────────────────────────────────────────────
 
-  private showError(err: unknown): void {
+  showError(err: unknown): void {
     if (err instanceof UserError) {
       void vscode.window.showInformationMessage(err.message);
       return;
@@ -404,11 +441,11 @@ class UserError extends Error {}
 
 let instance: Sift | null = null;
 
-export function activate(context: vscode.ExtensionContext): { projects: () => readonly Project[] } {
+export function activate(context: vscode.ExtensionContext): { projects: () => readonly Project[]; logicViews: () => readonly LogicView[] } {
   instance = new Sift(context);
   instance.activate();
   // Returned for integration tests.
-  return { projects: () => instance?.projects ?? [] };
+  return { projects: () => instance?.projects ?? [], logicViews: () => instance?.logic.views ?? [] };
 }
 
 export async function deactivate(): Promise<void> {
