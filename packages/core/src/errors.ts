@@ -10,7 +10,8 @@ export type SiftErrorCode =
   | "PROVIDER_FAILED"
   | "PROVIDER_AUTH"
   | "MODEL_UNAVAILABLE"
-  | "NOT_IMPLEMENTED";
+  | "NOT_IMPLEMENTED"
+  | "CANCELLED";
 
 /** An expected failure with a message fit to show the user as-is. */
 export class SiftError extends Error {

@@ -1,4 +1,4 @@
-import { createMessageConnection, ResponseError, StreamMessageReader, StreamMessageWriter, type MessageConnection } from "vscode-jsonrpc/node";
+import { createMessageConnection, ResponseError, StreamMessageReader, StreamMessageWriter, type CancellationToken, type MessageConnection } from "vscode-jsonrpc/node";
 import { SiftError, type SiftErrorCode } from "@sift/core";
 import { PROTOCOL_VERSION, type Notifications, type RequestMethod, type Requests, type SiftErrorData } from "./protocol.js";
 
@@ -19,9 +19,11 @@ export class SiftClient {
     return this.request("sift/initialize", { protocolVersion: PROTOCOL_VERSION });
   }
 
-  async request<M extends RequestMethod>(method: M, params: Requests[M]["params"]): Promise<Requests[M]["result"]> {
+  /** A `token` lets the caller cancel the request; `sift/generate` then stops and reports `cancelled`. */
+  async request<M extends RequestMethod>(method: M, params: Requests[M]["params"], token?: CancellationToken): Promise<Requests[M]["result"]> {
     try {
-      return (await this.connection.sendRequest(method, params)) as Requests[M]["result"];
+      const pending = token ? this.connection.sendRequest(method, params, token) : this.connection.sendRequest(method, params);
+      return (await pending) as Requests[M]["result"];
     } catch (err) {
       if (err instanceof ResponseError && err.data && typeof (err.data as SiftErrorData).code === "string") {
         const data = err.data as SiftErrorData;

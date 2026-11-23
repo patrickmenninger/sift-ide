@@ -52,6 +52,11 @@ export interface GenerateOptions {
   dryRun?: boolean;
   fullHash?: boolean;
   onEvent?: (event: GenerateEvent) => void;
+  /**
+   * Stops the run: no new AI calls start and running ones are cancelled. Units already described
+   * are written; the rest keep their previous descriptions, and the report says `cancelled`.
+   */
+  signal?: AbortSignal;
 }
 
 export type GenerateAction = "describe" | "update" | "context-check";
@@ -97,6 +102,8 @@ export interface GenerateReport {
   usage: { inputTokens: number; outputTokens: number; costUsd: number; calls: number };
   substitutions: { from: Tier; to: Tier; model: string }[];
   belowMinimum: string[];
+  /** Set when `signal` stopped the run before every planned unit was described. */
+  cancelled?: true;
 }
 
 interface WorkItem {
@@ -189,7 +196,13 @@ export async function generate(options: GenerateOptions): Promise<GenerateReport
   const results = new Map<string, SiftUnit>();
   const ctx: Context = {
     graph, rules, extractions, known, before, cycles, provider, router, report, emit, textOf, cache, substitutions: new Map(), abort: null,
+    ...(options.signal ? { signal: options.signal } : {}),
   };
+  const onAbort = () => {
+    ctx.abort ??= new SiftError("CANCELLED", "Cancelled.");
+  };
+  if (options.signal?.aborted) onAbort();
+  options.signal?.addEventListener("abort", onAbort);
 
   // Units to describe or update are batched per file and task (one AI call each, up to
   // batch.maxUnits units); kept units are handled one by one. Batches run callees before callers,
@@ -294,6 +307,11 @@ export async function generate(options: GenerateOptions): Promise<GenerateReport
   }
   for (const file of plan.deletedFiles) if (await deleteSiftFile(root, file)) report.removed.push(file);
 
+  options.signal?.removeEventListener("abort", onAbort);
+  if (ctx.abort?.code === "CANCELLED") {
+    report.cancelled = true;
+    return report;
+  }
   if (ctx.abort) throw ctx.abort;
   // Old unit sources are kept only while a description still refers to them.
   if (!options.paths?.length) {
@@ -320,8 +338,9 @@ interface Context {
   cache: SiftCache;
   /** Tier → tier used instead, once a model turned out to be unavailable in this run. */
   substitutions: Map<Tier, Tier>;
-  /** Set when the run must stop (e.g. not logged in); remaining units are skipped. */
+  /** Set when the run must stop (not logged in, or cancelled); remaining units are skipped. */
   abort: SiftError | null;
+  signal?: AbortSignal;
 }
 
 async function processItem(item: WorkItem, ctx: Context): Promise<SiftUnit | null> {
@@ -683,6 +702,8 @@ async function askWithRetry<T>(
       ctx.abort ??= err;
       return null;
     }
+    // A call cut short by cancelling is not a failure of this unit.
+    if (ctx.abort) return null;
     fail(item, ctx, err instanceof Error ? err.message : String(err), []);
   }
   return null;
@@ -706,8 +727,10 @@ async function completeWithFallback(
   const tried = new Set<Tier>();
   for (;;) {
     tried.add(current.tier);
+    // Nothing new starts once the run is stopping.
+    if (ctx.abort) throw ctx.abort;
     try {
-      const result = await ctx.provider.complete({ ...request, model: current.choice });
+      const result = await ctx.provider.complete({ ...request, model: current.choice, ...(ctx.signal ? { signal: ctx.signal } : {}) });
       ctx.report.usage.calls++;
       ctx.report.usage.inputTokens += result.usage.inputTokens ?? 0;
       ctx.report.usage.outputTokens += result.usage.outputTokens ?? 0;

@@ -5,3 +5,8 @@ coverage/
 eval/results/
 **/.sift/.cache/
 **/.sift/models.local.yaml
+.vscode-test/
+packages/vscode/prompts/
+packages/vscode/models/
+packages/vscode/rules/
+*.vsix

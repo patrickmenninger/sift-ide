@@ -52,6 +52,7 @@ export function renderGenerateReport(report: GenerateReport): string {
   ].filter(Boolean);
   const head = parts.length > 0 ? `${parts.join(", ")}.` : "Nothing to do: every description matches the code.";
   out.push("", head.charAt(0).toUpperCase() + head.slice(1));
+  if (report.cancelled) out.push("Cancelled: units not yet described keep their previous description, if any. Run generate again to finish.");
   if (report.failed.length > 0) out.push(`${plural(report.failed.length, "unit")} failed and kept their previous description, if any.`);
   if (report.written.length + report.removed.length > 0) {
     out.push(`Wrote ${plural(report.written.length, ".sift file")}${report.removed.length > 0 ? `, removed ${report.removed.length}` : ""}.`);

@@ -132,7 +132,9 @@ JSON-RPC requests mirror the `Workspace` methods (`sift/file`, `sift/callers`, `
 - Notifications: `sift/didChange` (`{ type: "source" | "descriptions", files }`) and `sift/generateProgress` (`{ token, event }`, for a `sift/generate` that passed a `token`).
 - Sift errors use JSON-RPC code `-32001`, with `data: { code, details }`; `SiftClient` turns them back into `SiftError`.
 - `sift serve` writes only protocol messages to stdout; it logs to stderr.
-- Not yet: cancelling a running `sift/generate` (needs an `AbortSignal` through the pipeline; M11, when the extension can trigger it), and edit methods (M14).
+- Not yet: edit methods (M14).
+
+**M11 additions:** cancelling a `sift/generate` request (`$/cancelRequest`) aborts an `AbortSignal` passed to `generate`. No AI call starts after that, running ones are cancelled through the provider's `signal`, and calls cut short are not counted as failures. Units already described are written; the rest keep their previous descriptions (and the file's `fileHash` stays old, so status still lists them); the report has `cancelled: true`. `sift/initialize` also returns `provider: { id, local } | null`, which the extension uses to say where code goes. Both changes are additive, so the protocol version stays 1.
 
 ## 5. MCP Server
 
@@ -222,6 +224,19 @@ Focused views only (requirements §3.9), each in its own webview panel or tree v
 | Impact | For the current git diff, or a pending edit: affected units and routes, grouped, with weakest confidence per path | Tree + optional diagram |
 
 Every node opens its logic on click (Alt+click: source). Edges drawn dashed for `name-match` and `rule`, so weaker connections are visible. Gaps are shown as "possible callers not resolved" nodes rather than hidden.
+
+### 6.6 As Built (M11): Extension Shell
+
+`packages/vscode` (`sift-vscode`; `esbuild` 0.28.2, `@vscode/vsce` 4.1.1, `@vscode/test-electron` 3.1.0; engine `^1.100.0`):
+
+- **Packaging.** `scripts/build.mjs` bundles from package sources (no `tsc -b` needed): `dist/extension.cjs` (CommonJS, `vscode` external) and `dist/server.mjs` (ESM: core, the TypeScript adapter, the claude-code provider, `@sift/server`, and `typescript` 6.0.3). Core finds its prompts and model maps at `../prompts` and `../models` relative to the bundle, so the build copies them to the extension root, with the rule packs as `rules/`. `typescript` locates its `lib.*.d.ts` next to `__filename`, so the server banner defines `require`, `__filename`, and `__dirname`, and the build copies the lib files into `dist/`. The extension bundle aliases `@sift/core` to `src/core-runtime.ts` (only `SiftError`): core reads files at load time, which must happen only in the server. `npm run package:vscode` minifies and writes `sift.vsix` (about 1.7 MB).
+- **Server lifecycle** (`server-process.ts`). One `sift serve` per workspace folder whose root holds `sift.config.yaml`, spawned on VS Code's own Node (`process.execPath` with `ELECTRON_RUN_AS_NODE=1`) as `server.mjs serve <root>`. It starts on activation, and on demand for a request. A crash after initialization is restarted with backoff (n seconds), at most three times in three minutes; then the state is `failed` until **Sift: Restart Server**. A failure before initialization (no config, protocol mismatch) is not retried, and its message includes the server's last stderr lines. Notification listeners survive restarts. Stopping closes stdin and kills after 2 s.
+- **Status** (`project.ts`, `status-model.ts`). Each project keeps the last `sift/status`. A file watcher on source, `.sift`, and config files schedules a refresh (debounced 400 ms; overlapping refreshes run once more, not once each), as does a `sift/didChange` of type `descriptions` (`source` changes come from refreshes the extension itself asked for, so they are ignored). The status bar sums projects; the **Out of Date** tree groups units by reason (stale, changed, new, renamed, ambiguous, callees changed, deleted, unreadable); explorer decorations mark files with any non-deleted entry, in a separate colour when every entry is "new" (not described yet rather than out of date).
+- **Callers / Callees views.** The unit at the cursor is found from the file's extraction (innermost non-module unit, else the module unit), so it works for undescribed code too. Each level is one `sift/callers`/`sift/callees` request at depth 1, expanded lazily; routes and events are leaves. Icons show edge confidence (`resolved` and `language-server` filled/outlined checks, `rule` a ruler, `name-match`/`inferred` a question mark); callees list propagated effects first; gaps are a collapsed group at the end. Clicking a unit opens its source; the inline action opens the call site.
+- **Generating.** Describe This File / Describe Folder / Update Out-of-Date (and the inline action on Out of Date groups and entries) run a dry run first and show a modal: units by task and model, possible context checks, renames and deletions done without AI, and where the code is sent. Sift has no price table, so the estimate is in units and models, not money. Renames and deletions with no AI work still ask before writing. The run shows per-unit progress and is cancellable; one run at a time. `sift.updateOnSave: ask` offers an update after a save that leaves the file out of date; "Not now" holds until the file's logic is current again.
+- **Sift: Initialize** runs `server.mjs init <folder>` and starts the server.
+- **Tests.** vitest covers the vscode-free modules against an in-process server (`test-support.ts`: a fake child process over in-memory pipes): lifecycle, crash restarts and giving up, start failures, status coalescing, the dry-run summary. `npm run test:vscode` runs `test/integration.cjs` in a downloaded VS Code on a fixture copy: activation, status, a new file appearing, Show Callers/Callees, command registration, restart. It is not part of `npm run verify` (it opens a window and downloads VS Code); CI on three platforms is still to come (§11).
+- Limits found along the way are listed in [extension-limits.md](extension-limits.md).
 
 ## 7. Schema v1
 
