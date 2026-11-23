@@ -1,6 +1,6 @@
 {
   "name": "@sift/adapter-typescript",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "description": "Sift language adapter for TypeScript and JavaScript, built on the TypeScript compiler API.",
   "type": "module",
@@ -13,7 +13,7 @@
     }
   },
   "dependencies": {
-    "@sift/core": "0.0.0",
+    "@sift/core": "0.1.0",
     "typescript": "6.0.3"
   }
 }
