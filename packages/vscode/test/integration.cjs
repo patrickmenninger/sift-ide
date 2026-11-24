@@ -25,6 +25,11 @@ function logicView(api, file) {
   return waitFor(`the logic of ${file}`, () => api.logicViews().find((v) => v.source === file && v.current.file));
 }
 
+/** A graph panel of a kind, once its model has loaded (and, given `match`, for that query). */
+function graphView(api, kind, match = () => true) {
+  return waitFor(`the ${kind} view`, () => api.graphViews().find((v) => v.query.view === kind && v.model && !v.current.loading && match(v)));
+}
+
 function unitOf(view, symbol) {
   return view.current.file.units.find((u) => u.unit.symbol === symbol);
 }
@@ -198,6 +203,61 @@ const tests = [
     },
   ],
   [
+    "Show Neighbourhood at the cursor draws transferFunds with both implementations; a node opens its logic",
+    async (api) => {
+      const editor = await openSource(SERVICE);
+      const line = lineOf(editor.document, "async transferFunds(");
+      editor.selection = new vscode.Selection(line + 1, 4, line + 1, 4);
+      await vscode.commands.executeCommand("sift.showNeighbourhood");
+      const view = await graphView(api, "neighbourhood");
+      // The bundled script (with elkjs) loaded under the webview's policy and drew the diagram.
+      const drawn = await waitFor("the diagram drawn", () => view.drawn);
+      assert.equal(drawn.error, undefined);
+      assert.equal(drawn.nodes, view.model.nodes.length);
+      assert.match(view.panel.title, /Neighbourhood: AccountService\.transferFunds/);
+      const ids = view.model.nodes.map((n) => n.id);
+      for (const repo of REPOSITORIES) assert.ok(ids.some((id) => id.startsWith(`${repo}#`) && id.endsWith(".save")), `${repo} is in the neighbourhood`);
+      assert.ok(view.model.edges.some((e) => e.kind === "implements"));
+      await view.receive({ type: "open", nodeId: `${PRISMA}#PrismaAccountRepository.save`, source: false });
+      const opened = await logicView(api, PRISMA);
+      const reveal = await waitFor("the unit revealed", () => opened.sent.find((m) => m.type === "reveal"));
+      assert.equal(opened.current.file.units.find((u) => u.unit.id === reveal.unitId).unit.symbol, "PrismaAccountRepository.save");
+      // Shift+click: the neighbourhood moves to that unit, in the same panel.
+      await view.receive({ type: "neighbourhood", nodeId: `${PRISMA}#PrismaAccountRepository.save` });
+      await waitFor("the new subject", () => view.model && view.model.nodes.find((n) => n.role === "subject").id.endsWith("PrismaAccountRepository.save"));
+      assert.equal(api.graphViews().filter((v) => v.query.view === "neighbourhood").length, 1);
+    },
+  ],
+  [
+    "the flow from each Express route reaches the Prisma calls with their effects",
+    async (api) => {
+      for (const route of ["route:POST /transfers", "route:GET /accounts/:id/balance"]) {
+        await vscode.commands.executeCommand("sift.showFlow", route);
+        const view = await graphView(api, "flow", (v) => v.query.route === route);
+        const drawn = await waitFor(`the flow of ${route} drawn`, () => view.drawn);
+        assert.equal(drawn.error, undefined);
+        const prisma = view.model.nodes.filter((n) => n.kind === "external" && n.detail === "@prisma/client");
+        assert.ok(prisma.length > 0, `${route} reaches Prisma`);
+        assert.ok(prisma.every((n) => n.effects.some((e) => e.startsWith("db."))));
+      }
+    },
+  ],
+  [
+    "Show Impact of Changing This lists POST /transfers; clicking the route shows its flow",
+    async (api) => {
+      const editor = await openSource(PRISMA);
+      const line = lineOf(editor.document, "async save(");
+      assert.ok(line >= 0);
+      editor.selection = new vscode.Selection(line + 1, 4, line + 1, 4);
+      await vscode.commands.executeCommand("sift.showImpact");
+      const view = await graphView(api, "impact");
+      assert.ok(view.model.nodes.some((n) => n.role === "changed" && n.id.endsWith("PrismaAccountRepository.save")));
+      assert.ok(view.model.nodes.some((n) => n.id === "route:POST /transfers"));
+      await view.receive({ type: "open", nodeId: "route:POST /transfers", source: false });
+      await graphView(api, "flow", (v) => v.query.route === "route:POST /transfers");
+    },
+  ],
+  [
     "an unsaved source edit is flagged in the logic document; once saved, the unit is stale",
     async (api) => {
       const view = await logicView(api, SERVICE);
@@ -228,7 +288,20 @@ const tests = [
     "commands are registered",
     async () => {
       const all = await vscode.commands.getCommands(true);
-      for (const id of ["sift.describeFile", "sift.updateAll", "sift.showCallers", "sift.showCallees", "sift.restartServer", "sift.initialize", "sift.openLogic", "sift.openSourceOfLogic"]) {
+      for (const id of [
+        "sift.describeFile",
+        "sift.updateAll",
+        "sift.showCallers",
+        "sift.showCallees",
+        "sift.restartServer",
+        "sift.initialize",
+        "sift.openLogic",
+        "sift.openSourceOfLogic",
+        "sift.showNeighbourhood",
+        "sift.showFlow",
+        "sift.showImpact",
+        "sift.showImpactOfChanges",
+      ]) {
         assert.ok(all.includes(id), `${id} is registered`);
       }
     },

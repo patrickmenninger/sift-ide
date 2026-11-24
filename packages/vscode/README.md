@@ -11,10 +11,11 @@ The extension runs Sift's engine for each workspace folder that has a `sift.conf
 - a dot in the explorer on files whose logic is out of date or not described yet,
 - an **Out of Date** view in the Sift sidebar, listing units by reason,
 - **Callers** and **Callees** views for the function at the cursor (editor context menu), with edge confidence and unresolved calls listed,
+- **diagrams** of the code around a function (**Show Neighbourhood Diagram**), of what an HTTP route does (**Show Route Flow…**, with effects on each box), and of what a change may affect (**Show Impact of Changing This**, **Show Impact of Uncommitted Changes**: a grouped list, with the diagram on request). Click a box to open its logic, Alt+click for its code, Shift+click for its neighbourhood. Dashed lines come from a rule pack or a name match; calls Sift could not resolve are listed in their own box. Diagrams follow the saved files and redraw after each save,
 - **Describe This File**, **Describe Folder**, and **Update Out-of-Date Descriptions**, which always show an estimate (units, models, where the code is sent) and ask before calling the AI. A run can be cancelled; units already described are kept.
 
 Without a Sift project, run **Sift: Initialize**.
 
 Generating uses Claude Code on your own login, as the `sift` CLI does. Nothing is sent without your confirmation. The `sift.updateOnSave` setting (`off` or `ask`) can offer an update after you save a file.
 
-Graph diagrams and editing logic arrive in later milestones.
+Editing logic arrives in a later milestone.
