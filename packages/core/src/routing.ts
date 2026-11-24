@@ -18,6 +18,10 @@ export const TASK_TIERS: Record<Task, { recommended: Tier; minimum: Tier }> = {
   update: { recommended: "mid", minimum: "mid" },
   "context-check": { recommended: "small", minimum: "small" },
   judge: { recommended: "frontier", minimum: "frontier" },
+  // Editing (phase-2-design §8.11): code generation never runs below frontier.
+  "edit-plan": { recommended: "frontier", minimum: "mid" },
+  "edit-code": { recommended: "frontier", minimum: "frontier" },
+  "edit-verify": { recommended: "mid", minimum: "mid" },
 };
 
 /** Higher is stronger. */

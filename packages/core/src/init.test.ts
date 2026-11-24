@@ -21,7 +21,7 @@ describe("initProject", () => {
     const config = parseConfig(await readFile(join(root, "sift.config.yaml"), "utf8"));
     expect(config.include).toEqual(["src/**"]);
     expect(await readFile(join(root, ".gitignore"), "utf8")).toBe(
-      "# Sift (derived data and per-machine model settings)\n.sift/.cache/\n.sift/models.local.yaml\n",
+      "# Sift (derived data, edit drafts, and per-machine model settings)\n.sift/.cache/\n.sift/edits/\n.sift/models.local.yaml\n",
     );
   });
 
@@ -52,7 +52,7 @@ describe("initProject", () => {
 
     expect(result.updated).toEqual([".gitignore"]);
     expect(await readFile(join(root, ".gitignore"), "utf8")).toBe(
-      "node_modules/\r\n.sift/.cache/\r\n\r\n# Sift (derived data and per-machine model settings)\r\n.sift/models.local.yaml\r\n",
+      "node_modules/\r\n.sift/.cache/\r\n\r\n# Sift (derived data, edit drafts, and per-machine model settings)\r\n.sift/edits/\r\n.sift/models.local.yaml\r\n",
     );
   });
 });

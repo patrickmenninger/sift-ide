@@ -9,6 +9,7 @@ import { claudeCodeProvider } from "@sift/provider-claude-code";
 import { serve } from "@sift/server";
 import { serveMcp } from "@sift/mcp";
 import { DEFAULT_CONFIG, loadMatrix, renderMarkdown, runEval, writeResults, type MatrixConfig } from "@sift/eval";
+import { registerEdit } from "./edit-command.js";
 import { renderGenerateReport, renderModels, renderPlan, renderStatus } from "./generate-render.js";
 import { renderCallees, renderCallers, renderFlow, renderImpact } from "./graph-render.js";
 import { renderSift, renderStructure } from "./render.js";
@@ -53,6 +54,8 @@ const PLANNED: { name: string; args?: string; summary: string; availableIn: stri
 export interface CliDeps {
   provider?: Provider;
   state?: { exitCode: number };
+  /** Asks a question on the terminal (sift edit); by default stdin when it is a terminal. */
+  ask?: (question: string) => Promise<string>;
 }
 
 export function providerFor(name: string, deps: Pick<CliDeps, "provider">): Provider {
@@ -306,6 +309,8 @@ export function buildProgram(io: CliIO = processIO, deps: CliDeps = {}): Command
       }
       if (result.refused.length > 0 && deps.state) deps.state.exitCode = EXIT.problems;
     });
+
+  registerEdit(program, io, deps, (cmd, withProvider) => openWorkspace(cwdOf(cmd), deps, { withProvider }));
 
   program
     .command("migrate")

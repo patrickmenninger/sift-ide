@@ -103,7 +103,8 @@ function previousJson(unit: SiftUnit, lite: boolean): string {
     inputs: unit.inputs.map((i) => ({ name: i.name, meaning: i.meaning })),
     returns: unit.returns ? { meaning: unit.returns.meaning } : null,
     ...(lite ? {} : { steps: unit.steps.map(step) }),
-    warnings: unit.warnings.map((w) => ({ kind: w.kind, text: w.text, ...(lite ? {} : { covers: w.steps.flatMap((id) => covers.get(id) ?? []) }) })),
+    // A warning an edit resolved is not shown: the update drops it unless the code still has the problem.
+    warnings: unit.warnings.filter((w) => !w.resolved).map((w) => ({ kind: w.kind, text: w.text, ...(lite ? {} : { covers: w.steps.flatMap((id) => covers.get(id) ?? []) }) })),
   };
   return JSON.stringify(data, null, 1);
 }

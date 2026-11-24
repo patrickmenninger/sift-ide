@@ -11,7 +11,10 @@ export type SiftErrorCode =
   | "PROVIDER_AUTH"
   | "MODEL_UNAVAILABLE"
   | "NOT_IMPLEMENTED"
-  | "CANCELLED";
+  | "CANCELLED"
+  | "EDIT_NOT_FOUND"
+  | "EDIT_INVALID_STATE"
+  | "EDIT_CONFLICT";
 
 /** An expected failure with a message fit to show the user as-is. */
 export class SiftError extends Error {

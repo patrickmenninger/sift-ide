@@ -1,11 +1,11 @@
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import ts from "typescript";
 import { SiftError, type AdapterOptions, type AdapterProject, type LanguageAdapter } from "@sift/core";
 import { hashFileText } from "./hash-file.js";
 import { TsProject } from "./project.js";
 
-export { TsProject } from "./project.js";
+export { TsProject, type ProjectSource } from "./project.js";
 
 const DEFAULT_OPTIONS: ts.CompilerOptions = {
   target: ts.ScriptTarget.ES2022,
@@ -25,15 +25,28 @@ export const typescriptAdapter: LanguageAdapter = {
   async openProject(root: string, files: string[], options?: AdapterOptions): Promise<AdapterProject> {
     const absRoot = resolve(root);
     const config = loadCompilerConfig(absRoot);
-    const rootNames = [...new Set([...config.fileNames, ...files.map((f) => resolve(absRoot, f))])];
+    const source = {
+      // The tsconfig's own file list can grow (new files matching its "include"), so it is read again.
+      rootNames: (abs: string[]) => [...new Set([...loadCompilerConfig(absRoot).fileNames, ...abs])],
+      stamp: () => configStamp(absRoot),
+    };
     const program = ts.createProgram({
-      rootNames,
+      rootNames: [...new Set([...config.fileNames, ...files.map((f) => resolve(absRoot, f))])],
       // Sift only reads the project: never emit, and always accept JavaScript files it is asked about.
       options: { ...config.options, noEmit: true, allowJs: true },
     });
-    return new TsProject(absRoot, program, options);
+    return new TsProject(absRoot, program, options, source);
   },
 };
+
+/** Which config file the project uses and when it last changed. */
+function configStamp(root: string): string {
+  for (const name of ["tsconfig.json", "jsconfig.json"]) {
+    const path = join(root, name);
+    if (existsSync(path)) return `${name}:${statSync(path).mtimeMs}`;
+  }
+  return "none";
+}
 
 /**
  * Read tsconfig.json or jsconfig.json from the project root only. ts.findConfigFile is not used

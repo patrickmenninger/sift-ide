@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { CONFIG_FILE, SIFT_DIR } from "./config.js";
 import { writeFileAtomic } from "./fs.js";
 
-export const GITIGNORE_ENTRIES = [`${SIFT_DIR}/.cache/`, `${SIFT_DIR}/models.local.yaml`] as const;
+/** `.sift/edits/` holds drafts and undo records (phase-2-design §8.2): personal work, never committed. */
+export const GITIGNORE_ENTRIES = [`${SIFT_DIR}/.cache/`, `${SIFT_DIR}/edits/`, `${SIFT_DIR}/models.local.yaml`] as const;
 
 export interface InitResult {
   /** Project-relative paths created. */
@@ -48,7 +49,7 @@ export async function initProject(root: string): Promise<InitResult> {
     let text = existing ?? "";
     if (text !== "" && !text.endsWith("\n")) text += eol;
     if (text !== "") text += eol;
-    text += ["# Sift (derived data and per-machine model settings)", ...missing].join(eol) + eol;
+    text += ["# Sift (derived data, edit drafts, and per-machine model settings)", ...missing].join(eol) + eol;
     await writeFileAtomic(gitignorePath, text);
     (existing === null ? result.created : result.updated).push(".gitignore");
   }

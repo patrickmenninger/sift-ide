@@ -27,7 +27,32 @@ export interface AdapterProject {
   extractFile(path: string): FileExtraction;
   /** All implementations of an interface or abstract member. */
   findImplementations(symbol: SymbolRef): SymbolRef[];
+  /**
+   * Bring the project up to date with the files on disk, keeping what did not change (an open
+   * project between requests, phase-2-design §4). `files` is the current list of source files.
+   * Returns false when the project must be opened again instead (for example, its tsconfig changed).
+   */
+  refresh?(files: string[]): boolean;
+  /** Extract a file as if its text were `text`, without touching disk (phase-2-design §8.10). */
+  extractText?(path: string, text: string): FileExtraction;
+  /**
+   * Diagnostics that appear with the overlays (path → text) and not without them, in `files`,
+   * the overlaid files, and the files that import an overlaid file (phase-2-design §8.6).
+   */
+  diagnostics?(overlays: Map<string, string>, files: string[]): Diagnostic[];
+  /** The source text of a type declaration (class, interface, type alias, enum), for edit prompts. */
+  declarationText?(ref: SymbolRef): string | null;
   dispose(): void;
+}
+
+export interface Diagnostic {
+  /** Project-relative path. */
+  file: string;
+  range: SourceRange;
+  message: string;
+  /** e.g. "TS2345". */
+  code: string;
+  severity: "error" | "warning";
 }
 
 export interface FileExtraction {

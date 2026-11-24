@@ -62,6 +62,36 @@ export function serve(options: ServeOptions): { connection: MessageConnection; c
       }
     },
     "sift/verify": ({ targets }) => workspace.verify(targets),
+    "sift/edit/create": (p) => workspace.edits.create(p),
+    "sift/edit/update": ({ id, ...change }) => workspace.edits.update(id, change),
+    "sift/edit/get": ({ id }) => workspace.edits.get(id),
+    "sift/edit/list": (p) => workspace.edits.list(p),
+    "sift/edit/propose": async ({ id, token }, cancel) => {
+      const controller = new AbortController();
+      const subscription = cancel.onCancellationRequested(() => controller.abort());
+      try {
+        return await workspace.edits.propose(id, {
+          signal: controller.signal,
+          ...(token !== undefined ? { onEvent: (event) => notify("sift/editProgress", { token, event }) } : {}),
+        });
+      } finally {
+        subscription.dispose();
+      }
+    },
+    "sift/edit/answer": ({ id, answers }) => workspace.edits.answer(id, answers),
+    "sift/edit/runChecks": async ({ id }, cancel) => {
+      const controller = new AbortController();
+      const subscription = cancel.onCancellationRequested(() => controller.abort());
+      try {
+        return await workspace.edits.runChecks(id, { signal: controller.signal });
+      } finally {
+        subscription.dispose();
+      }
+    },
+    "sift/edit/apply": ({ id, ...options }) => workspace.edits.apply(id, options),
+    "sift/edit/reject": ({ id }) => workspace.edits.reject(id),
+    "sift/edit/rebase": ({ id }) => workspace.edits.rebase(id),
+    "sift/edit/undo": ({ id }) => workspace.edits.undo(id),
   };
 
   for (const [method, handler] of Object.entries(handlers) as [RequestMethod, (p: unknown, token: CancellationToken) => Promise<unknown>][]) {

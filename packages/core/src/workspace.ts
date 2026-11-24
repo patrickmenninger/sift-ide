@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { ExtractedUnit, FileExtraction, LanguageAdapter, SourcePosition, SourceRange, StructureNode } from "./adapter.js";
@@ -6,8 +7,10 @@ import { flatten } from "./describe-input.js";
 import { stepOwners } from "./describe-output.js";
 import { gitDiff } from "./diff.js";
 import { SiftError } from "./errors.js";
+import { EDITS_DIR, EditService } from "./edit-service.js";
 import { generate, type GenerateEvent, type GenerateReport } from "./generate.js";
 import { fileOfId, unitId, type CodeGraph, type FlowResult, type GapNote, type ImpactResult, type QueryHit } from "./graph.js";
+import { OpenProjects } from "./open-projects.js";
 import { loadExtractions, refreshGraph, type RefreshResult } from "./project-index.js";
 import { displayStatus } from "./provenance.js";
 import type { Provider } from "./provider.js";
@@ -40,7 +43,9 @@ export type WorkspaceChange =
   /** Source files whose graph entry was rebuilt or dropped by a refresh. */
   | { type: "source"; files: string[] }
   /** `.sift` files Sift wrote or removed (project-relative `.sift/...` paths). */
-  | { type: "descriptions"; files: string[] };
+  | { type: "descriptions"; files: string[] }
+  /** Change requests that were created, changed, or found to need review (phase-2-design §8.9). */
+  | { type: "edits"; ids: string[] };
 
 export interface Disposable {
   dispose(): void;
@@ -101,6 +106,10 @@ export class Workspace {
   private readonly listeners = new Set<(e: WorkspaceChange) => void>();
   private readonly siftCache = new Map<string, { size: number; mtimeMs: number; file: SiftFile | null; error?: unknown }>();
   private disposed = false;
+  /** Adapter projects stay open between requests (phase-2-design §4). */
+  private readonly projects: OpenProjects;
+  /** Natural-language editing (phase-2-design §8). */
+  readonly edits: EditService;
 
   private constructor(
     readonly root: string,
@@ -109,7 +118,35 @@ export class Workspace {
     readonly loadedRules: LoadedRules,
     private readonly options: WorkspaceOptions,
     readonly provider: Provider | undefined,
-  ) {}
+  ) {
+    this.projects = new OpenProjects(options.adapters);
+    this.edits = new EditService({
+      root,
+      config,
+      rules,
+      provider,
+      router: async () => (await this.router(provider?.id)).router,
+      graph: () => this.graph(),
+      extraction: (source) => this.extraction(source),
+      extractions: (sources) =>
+        this.serial(async () => {
+          const { graph } = await this.refreshNow({});
+          return loadExtractions({ root: this.root, config: this.config, adapters: this.adapters }, graph, sources.filter((s) => graph.files.includes(s)));
+        }),
+      unit: (query) => this.unit(query),
+      unitIndex: () => this.unitIndex(),
+      project: (source) =>
+        this.serial(async () => {
+          const { graph } = await this.refreshNow({});
+          const adapter = this.adapterFor(source);
+          const mine = graph.files.filter((f) => adapter.extensions.some((e) => f.toLowerCase().endsWith(e)));
+          return this.projects.open(adapter, this.root, mine, { liteMaxStatements: this.config.lite.maxStatements });
+        }),
+      hashFile: (source, text) => this.adapterFor(source).hashFile(source, text),
+      exclusive: (task) => this.serial(task),
+      changed: (items, kind) => this.emit(kind === "edits" ? { type: "edits", ids: items } : { type: kind, files: items }),
+    });
+  }
 
   static async open(options: WorkspaceOptions): Promise<Workspace> {
     const project = await loadProject(options.cwd);
@@ -118,8 +155,9 @@ export class Workspace {
     return new Workspace(project.root, project.config, new RuleSet(loaded.packs), loaded, options, provider);
   }
 
+  /** The language adapters, with their projects kept open by the workspace. */
   get adapters(): LanguageAdapter[] {
-    return this.options.adapters;
+    return this.projects.adapters;
   }
 
   onDidChange(listener: (e: WorkspaceChange) => void): Disposable {
@@ -130,6 +168,7 @@ export class Workspace {
   dispose(): void {
     this.disposed = true;
     this.listeners.clear();
+    this.projects.dispose();
   }
 
   // ------------------------------------------------------------------ freshness
@@ -155,7 +194,12 @@ export class Workspace {
     });
     this.graphValue = result.graph;
     const files = [...result.rebuilt, ...result.removed];
-    if (files.length > 0) this.emit({ type: "source", files });
+    if (files.length > 0) {
+      this.emit({ type: "source", files });
+      // Pending edits on code that just changed need review (phase-2-design §8.9). Run after this
+      // operation, since the check itself reads the workspace.
+      if (existsSync(join(this.root, EDITS_DIR))) void Promise.resolve().then(() => this.edits.checkPending().catch(() => []));
+    }
     return result;
   }
 
@@ -519,6 +563,13 @@ export class Workspace {
       this.siftCache.set(source, { size: info.size, mtimeMs: info.mtimeMs, file: null, error });
       throw error;
     }
+  }
+
+  private adapterFor(file: string): LanguageAdapter {
+    const dot = file.lastIndexOf(".");
+    const adapter = this.adapters.find((a) => a.extensions.includes(file.slice(dot).toLowerCase()));
+    if (!adapter) throw this.notASourceFile(file);
+    return adapter;
   }
 
   private supports(file: string): boolean {

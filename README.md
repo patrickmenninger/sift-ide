@@ -145,6 +145,31 @@ You can edit summaries and step texts by hand and mark them as yours. Don't edit
 
 **Schema versions.** `.sift` files written by Sift 0.1 are schema 0. A file moves to schema 1 only when it gets a schema 1 field (step `status`, `userEdited`, or a resolved warning), so upgrading Sift does not touch your files. `sift migrate` upgrades them all at once if you prefer one commit. Older versions of Sift refuse schema 1 files rather than misread them.
 
+## Changing code through its description
+
+Edit what a function should do, in its description or in your own words, and Sift proposes the code change for you to review. Nothing is written until you approve it.
+
+```bash
+sift edit AccountService.withdraw --request "Reject amounts of zero or less"
+sift edit AccountService.transferFunds --step s_b2v7 --text "Save both accounts inside one database transaction."
+```
+
+Sift plans the change (and asks if the request leaves something important open: what happens on failure, transaction boundaries, who may do it), writes the code for that unit only, checks that it parses, type-checks, and changes nothing outside the request, describes the new code, and compares that with what you asked. It prints the plan, the logic diff, the code diff, the scope (what else may be affected, and which routes reach it), and the checks. Then:
+
+```bash
+sift edit apply e_ab12cd34       # write the code and the description; --apply on the first command does the same
+sift edit undo e_ab12cd34        # restore both, only if nothing changed them since
+sift edit list                   # open change requests
+```
+
+- Questions are asked on the terminal, or answered ahead of time (`--answer q1="Stop with an error"`) or later (`sift edit answer <id> q1=…`).
+- A rewording that doesn't change behaviour is kept only if it is still accurate for the code; no code is generated.
+- A change that reaches other units (callers of a changed signature, other implementations) is shown as a broader change and needs `--confirm-broader`.
+- If the code changes before you apply, the request is marked for review and is never applied to code it wasn't written against (`sift edit replan <id>` starts it over).
+- `sift edit checks <id>` runs the commands in `edit.checks` (below) against a temporary copy of the project with the change. Generated code is never run unless you ask.
+
+Change requests are kept in `.sift/edits/` (git-ignored). Planning and code generation use the frontier tier (Opus 5.5); describing the new code and the intent check use the mid tier.
+
 ## AI coding agents (MCP)
 
 `sift mcp` gives an AI coding agent the same answers as the commands above, as MCP tools: what a function does, who calls it, what a change affects, and what a route reaches. To add it to Claude Code, run this in your project's root (after `npm link`, so `sift` is on your PATH):
@@ -210,6 +235,11 @@ models:                       # optional; shared by the team
     describe: mid             # run a task on another tier
   tiers:
     small: { model: claude-haiku-5-5, effort: low }   # use another model for a tier
+edit:                         # optional; for sift edit
+  checks:                     # run on request against a copy of the project with a proposed change
+    - npm run lint
+    - { name: tests, command: npx vitest related src --run }
+  checkTimeoutSeconds: 300
 ```
 
 **Models.** Each task runs on a tier, and each tier maps to a model: describing and updating on the mid tier (Sonnet 5.5), small functions and caller checks on the small tier (Haiku 5.5). `sift models` shows the current routing and where each choice came from. Personal overrides go in `.sift/models.local.yaml` with the same `tasks` / `tiers` shape. If a model isn't available on your plan, Sift falls back to the next tier and says so.
@@ -232,7 +262,8 @@ edges:
 ## Privacy and cost
 
 - Sift sends each function's code, with the signatures and summaries of what it calls, to Anthropic through Claude Code, on your own login. Nothing else in the project is sent, and Claude Code runs with no tools, no project settings, and no MCP servers.
-- Values that look like secrets (API keys, tokens, private keys, high-entropy strings) are replaced with `<redacted>` before anything is sent; the run summary says how many.
+- `sift edit` also sends the code of the units it may change, their files' imports, the project types they use, and up to three similar functions from the project as examples.
+- Values that look like secrets (API keys, tokens, private keys, high-entropy strings) are replaced with `<redacted>` before anything is sent; the run summary says how many. `sift edit` refuses to rewrite a unit that contains one, since the model could not write it back.
 - Costs are shown at API prices for comparison. On a subscription they are not billed; your plan's usage limits apply instead. Describing a 30-function project costs about $0.60 at API prices; keeping it in sync costs a few cents per change.
 
 ## Troubleshooting
