@@ -4,6 +4,7 @@ import { join } from "node:path";
 import * as vscode from "vscode";
 import type { GenerateEvent, SourceRange } from "@sift/core";
 import { planSummary, resultSummary } from "./generate-summary.js";
+import { GraphPanels, type GraphHost, type GraphPanel } from "./graph-panels.js";
 import { LogicDocuments, type LogicHost, type LogicView } from "./logic-editor.js";
 import { sourceOfLogic } from "./logic-model.js";
 import { Project } from "./project.js";
@@ -17,7 +18,7 @@ const CONFIG_FILE = "sift.config.yaml";
  * sift.config.yaml, a status bar item and explorer decorations for out-of-date logic, the
  * out-of-date, callers, and callees views, and generating with an estimate first.
  */
-class Sift implements ProjectRegistry, LogicHost, vscode.Disposable {
+class Sift implements ProjectRegistry, LogicHost, GraphHost, vscode.Disposable {
   private readonly byFolder = new Map<string, Project>();
   private readonly changeEmitter = new vscode.EventEmitter<void>();
   readonly onDidChange = this.changeEmitter.event;
@@ -28,6 +29,7 @@ class Sift implements ProjectRegistry, LogicHost, vscode.Disposable {
   private readonly decorations = new OutOfDateDecorations(this);
   private readonly statusBar = new SiftStatusBar(this);
   readonly logic = new LogicDocuments(this);
+  readonly graphs = new GraphPanels(this);
   private readonly disposables: vscode.Disposable[] = [];
   /** Files the user said "not now" to under `sift.updateOnSave: ask`, until their logic is current again. */
   private readonly declined = new Set<string>();
@@ -56,6 +58,7 @@ class Sift implements ProjectRegistry, LogicHost, vscode.Disposable {
       vscode.window.registerFileDecorationProvider(this.decorations),
       this.logic,
       this.logic.register(),
+      this.graphs,
       vscode.workspace.onDidChangeWorkspaceFolders(() => this.syncFolders()),
       vscode.workspace.onDidSaveTextDocument((doc) => this.onSaved(doc)),
     );
@@ -88,6 +91,15 @@ class Sift implements ProjectRegistry, LogicHost, vscode.Disposable {
     command("sift.showCallees", (uri?: vscode.Uri) => this.showCalls("callees", uri));
     command("sift.showCallersOfNode", (node?: { project: Project; hit?: { id: string }; id?: string }) => this.showCallsOfNode("callers", node));
     command("sift.showCalleesOfNode", (node?: { project: Project; hit?: { id: string }; id?: string }) => this.showCallsOfNode("callees", node));
+    command("sift.showNeighbourhood", (uri?: vscode.Uri) => this.showNeighbourhood(uri));
+    command("sift.showNeighbourhoodOfNode", (node?: { project: Project; hit?: { id: string }; id?: string }) => {
+      const id = node?.hit?.id ?? node?.id;
+      if (node && id && id.includes("#") && !id.startsWith("ext:")) return this.graphs.show(node.project, { view: "neighbourhood", ref: id });
+      return undefined;
+    });
+    command("sift.showFlow", (route?: string) => this.showFlow(route));
+    command("sift.showImpact", (uri?: vscode.Uri) => this.showImpact(uri));
+    command("sift.showImpactOfChanges", () => this.showImpactOfChanges());
     command("sift.openLogic", (uri?: vscode.Uri) => this.openLogic(uri));
     command("sift.openSourceOfLogic", () => this.openSourceOfLogic());
     command("sift.openUnit", (root: string, ref: string) => this.openUnit(root, ref));
@@ -345,6 +357,85 @@ class Sift implements ProjectRegistry, LogicHost, vscode.Disposable {
     await vscode.commands.executeCommand(`sift.${direction}.focus`);
   }
 
+  // ── Graph views (phase-2-design §6.5) ───────────────────────────────────────────────────
+
+  /** The unit at the cursor (or the file's module scope), for commands that act on it. */
+  private async unitAtCursor(uri?: vscode.Uri): Promise<{ project: Project; ref: string }> {
+    const editor = vscode.window.activeTextEditor;
+    const target = uri ?? editor?.document.uri;
+    const { project, path } = this.requireProject(target);
+    const position = editor && target && editor.document.uri.toString() === target.toString() ? editor.selection.active : new vscode.Position(0, 0);
+    const unit = await project.unitAt(path, { line: position.line + 1, col: position.character + 1 });
+    if (!unit) throw new UserError(`Sift found no function or method at the cursor in ${path}.`);
+    return { project, ref: unit.ref };
+  }
+
+  private async showNeighbourhood(uri?: vscode.Uri): Promise<void> {
+    const { project, ref } = await this.unitAtCursor(uri);
+    await this.graphs.show(project, { view: "neighbourhood", ref });
+  }
+
+  private async showImpact(uri?: vscode.Uri): Promise<void> {
+    const { project, ref } = await this.unitAtCursor(uri);
+    await this.graphs.show(project, { view: "impact", refs: [ref], what: `changing ${ref.slice(ref.indexOf("#") + 1)}` });
+  }
+
+  private async showImpactOfChanges(): Promise<void> {
+    const project = await this.pickProject("Show the impact of changes in which project?");
+    if (project) await this.graphs.show(project, { view: "impact", refs: [], diff: "HEAD", what: "uncommitted changes" });
+  }
+
+  /** Show a route's flow; without a route, pick one. */
+  private async showFlow(route?: string): Promise<void> {
+    const project = await this.pickProject("Show a route from which project?");
+    if (!project) return;
+    if (route) {
+      await this.graphs.show(project, { view: "flow", route: route.startsWith("route:") ? route : `route:${route}` });
+      return;
+    }
+    const routes = await project.server.request("sift/routes", {});
+    if (routes.length === 0) throw new UserError("Sift found no HTTP routes in this project. Routes come from rule packs (Express is built in).");
+    const picked = await vscode.window.showQuickPick(
+      routes.map((r) => ({ label: r.slice("route:".length), route: r })),
+      { title: "Show Route Flow", placeHolder: "Which route?", matchOnDescription: true },
+    );
+    if (picked) await this.graphs.show(project, { view: "flow", route: picked.route });
+  }
+
+  /** The project of the active editor, the only project, or one the user picks. */
+  private async pickProject(question: string): Promise<Project | undefined> {
+    const projects = this.projects;
+    if (projects.length === 0) throw new UserError('This workspace has no Sift project. Run "Sift: Initialize" to set one up.');
+    const active = vscode.window.activeTextEditor && this.projectFor(vscode.window.activeTextEditor.document.uri);
+    if (active) return active;
+    if (projects.length === 1) return projects[0];
+    const picked = await vscode.window.showQuickPick(
+      projects.map((p) => ({ label: vscode.workspace.getWorkspaceFolder(vscode.Uri.file(p.root))?.name ?? p.root, project: p })),
+      { placeHolder: question },
+    );
+    return picked?.project;
+  }
+
+  /** From a graph view: open a unit's logic, scrolled to it (or the file's logic when it is not described yet). */
+  async openUnitLogic(project: Project, ref: string): Promise<void> {
+    const file = ref.slice(0, ref.indexOf("#"));
+    const logic = await project.server.request("sift/logicFile", { source: file }).catch(() => null);
+    const unit = logic?.units.find((u) => u.ref === ref);
+    await this.logic.open(project, file, { ...(unit ? { reveal: unit.unit.id } : {}), viewColumn: vscode.ViewColumn.Beside });
+  }
+
+  openCode(project: Project, ref: string): Promise<void> {
+    return this.openUnit(project.root, ref);
+  }
+
+  openSite(project: Project, file: string, range: SourceRange): Promise<void> {
+    return this.openRange(project.root, file, range);
+  }
+
+  log(line: string): void {
+    this.output.warn(line);
+  }
+
   // ── Logic documents (phase-2-design §6.1) ───────────────────────────────────────────────
 
   describe(uri: vscode.Uri): Promise<void> {
@@ -441,11 +532,11 @@ class UserError extends Error {}
 
 let instance: Sift | null = null;
 
-export function activate(context: vscode.ExtensionContext): { projects: () => readonly Project[]; logicViews: () => readonly LogicView[] } {
+export function activate(context: vscode.ExtensionContext): { projects: () => readonly Project[]; logicViews: () => readonly LogicView[]; graphViews: () => readonly GraphPanel[] } {
   instance = new Sift(context);
   instance.activate();
   // Returned for integration tests.
-  return { projects: () => instance?.projects ?? [], logicViews: () => instance?.logic.views ?? [] };
+  return { projects: () => instance?.projects ?? [], logicViews: () => instance?.logic.views ?? [], graphViews: () => instance?.graphs.views ?? [] };
 }
 
 export async function deactivate(): Promise<void> {

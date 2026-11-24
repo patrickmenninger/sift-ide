@@ -1,0 +1,294 @@
+/* The graph views (phase-2-design §6.5), styled from VS Code's theme variables so they follow
+   light, dark, and high-contrast themes. */
+
+body {
+  padding: 0;
+  margin: 0;
+  color: var(--vscode-foreground);
+  background: var(--vscode-editor-background);
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size);
+  line-height: 1.5;
+}
+
+.graph-page {
+  padding: 10px 16px 32px;
+}
+
+.muted {
+  color: var(--vscode-descriptionForeground);
+}
+
+code {
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.95em;
+}
+
+a {
+  color: var(--vscode-textLink-foreground);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+button {
+  font: inherit;
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
+  border: 1px solid var(--vscode-button-border, transparent);
+  border-radius: 2px;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+button:hover {
+  background: var(--vscode-button-hoverBackground);
+}
+button.secondary {
+  color: var(--vscode-button-secondaryForeground);
+  background: var(--vscode-button-secondaryBackground);
+}
+button.secondary:hover {
+  background: var(--vscode-button-secondaryHoverBackground);
+}
+button.small {
+  padding: 0 8px;
+  font-size: 0.9em;
+}
+button:focus-visible,
+a:focus-visible,
+.node:focus-visible,
+.gap-line:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+.graph-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.titles {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.view-name {
+  font-size: 0.85em;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--vscode-descriptionForeground);
+}
+.graph-header h1 {
+  margin: 0;
+  font-size: 1.1em;
+  font-weight: 600;
+  font-family: var(--vscode-editor-font-family);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.subtitle {
+  font-size: 0.9em;
+}
+
+.banner {
+  padding: 4px 10px;
+  margin: 6px 0;
+  border-left: 3px solid;
+  border-radius: 2px;
+}
+.banner.warning {
+  border-color: var(--vscode-editorWarning-foreground);
+  background: var(--vscode-inputValidation-warningBackground, transparent);
+}
+.banner.error {
+  border-color: var(--vscode-editorError-foreground);
+  background: var(--vscode-inputValidation-errorBackground, transparent);
+}
+.banner.info {
+  border-color: var(--vscode-editorInfo-foreground);
+  background: var(--vscode-inputValidation-infoBackground, transparent);
+}
+
+.empty {
+  margin-top: 16px;
+}
+
+/* ── Diagram ───────────────────────────────────────────────────────────── */
+
+.diagram-section {
+  margin-top: 8px;
+}
+.diagram-tools {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 4px;
+  font-size: 0.9em;
+}
+.diagram-tools .spacer {
+  flex: 1;
+}
+.legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.diagram {
+  overflow: auto;
+  border: 1px solid var(--vscode-panel-border, var(--vscode-widget-border, transparent));
+  border-radius: 2px;
+}
+.diagram svg {
+  display: block;
+}
+
+.edge {
+  fill: none;
+  stroke: var(--vscode-descriptionForeground);
+  stroke-width: 1.3;
+}
+.edge.weak {
+  stroke-dasharray: 5 4;
+}
+.edge-implements {
+  stroke: var(--vscode-symbolIcon-interfaceForeground, var(--vscode-descriptionForeground));
+}
+.arrow-head {
+  fill: var(--vscode-descriptionForeground);
+}
+
+.node rect {
+  fill: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  stroke: var(--vscode-editorWidget-border, var(--vscode-widget-border, var(--vscode-descriptionForeground)));
+  stroke-width: 1;
+}
+.node.openable {
+  cursor: pointer;
+}
+.node.openable:hover > rect {
+  stroke: var(--vscode-focusBorder);
+}
+.node.role-subject > rect,
+.node.role-changed > rect {
+  stroke: var(--vscode-focusBorder);
+  stroke-width: 2;
+}
+.node.role-changed > rect {
+  stroke: var(--vscode-editorWarning-foreground);
+}
+.node.kind-declaration > rect {
+  stroke-dasharray: 3 2;
+}
+.node.kind-external > rect {
+  fill: var(--vscode-editor-background);
+}
+.node.kind-route > rect,
+.node.kind-event > rect {
+  fill: var(--vscode-badge-background);
+  stroke: none;
+}
+.node.kind-route text,
+.node.kind-event text {
+  fill: var(--vscode-badge-foreground);
+}
+.node.kind-gaps > rect {
+  fill: none;
+  stroke: var(--vscode-editorWarning-foreground);
+  stroke-dasharray: 4 3;
+}
+.node.weak-path > rect {
+  stroke-dasharray: 5 4;
+}
+
+.node text {
+  fill: var(--vscode-foreground);
+  font-family: var(--vscode-font-family);
+  font-size: calc(var(--vscode-font-size) - 1px);
+}
+.node text.label {
+  font-family: var(--vscode-editor-font-family);
+  font-size: var(--vscode-font-size);
+  font-weight: 600;
+}
+.node.kind-unit text.label,
+.node.kind-declaration text.label {
+  fill: var(--vscode-symbolIcon-methodForeground, var(--vscode-foreground));
+}
+.node text.detail {
+  fill: var(--vscode-descriptionForeground);
+}
+.gap-line {
+  cursor: pointer;
+  fill: var(--vscode-textLink-foreground) !important;
+}
+.gap-line:hover {
+  text-decoration: underline;
+}
+
+.chip rect {
+  fill: var(--vscode-badge-background);
+  stroke: none;
+}
+.chip text {
+  fill: var(--vscode-badge-foreground);
+  font-size: calc(var(--vscode-font-size) - 2px);
+}
+.chip.effect-db rect {
+  fill: var(--vscode-charts-blue, var(--vscode-badge-background));
+}
+.chip.effect-network rect {
+  fill: var(--vscode-charts-purple, var(--vscode-badge-background));
+}
+.chip.effect-fs rect {
+  fill: var(--vscode-charts-green, var(--vscode-badge-background));
+}
+.chip.effect-throws rect {
+  fill: var(--vscode-charts-red, var(--vscode-badge-background));
+}
+.chip.effect-db text,
+.chip.effect-network text,
+.chip.effect-fs text,
+.chip.effect-throws text {
+  fill: var(--vscode-editor-background);
+}
+
+/* ── Impact list ───────────────────────────────────────────────────────── */
+
+.impact-group h2 {
+  font-size: 1em;
+  font-weight: 600;
+  margin: 14px 0 4px;
+}
+.impact-group ul {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 4px;
+}
+.impact-group li {
+  padding: 1px 0;
+}
+.impact-group .hint {
+  margin: 0 0 4px;
+  font-size: 0.9em;
+}
+.confidence {
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 8px;
+  font-size: 0.85em;
+  border: 1px dashed var(--vscode-editorWarning-foreground);
+  color: var(--vscode-editorWarning-foreground);
+}
+
+@media (forced-colors: active) {
+  .edge,
+  .node rect {
+    stroke: CanvasText;
+  }
+}

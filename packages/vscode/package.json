@@ -96,6 +96,40 @@
         "icon": "$(call-outgoing)"
       },
       {
+        "command": "sift.showNeighbourhood",
+        "title": "Show Neighbourhood Diagram",
+        "category": "Sift",
+        "icon": "$(type-hierarchy)",
+        "enablement": "sift.active"
+      },
+      {
+        "command": "sift.showNeighbourhoodOfNode",
+        "title": "Show Neighbourhood Diagram",
+        "category": "Sift",
+        "icon": "$(type-hierarchy)"
+      },
+      {
+        "command": "sift.showFlow",
+        "title": "Show Route Flow…",
+        "category": "Sift",
+        "icon": "$(git-pull-request-go-to-changes)",
+        "enablement": "sift.active"
+      },
+      {
+        "command": "sift.showImpact",
+        "title": "Show Impact of Changing This",
+        "category": "Sift",
+        "icon": "$(pulse)",
+        "enablement": "sift.active"
+      },
+      {
+        "command": "sift.showImpactOfChanges",
+        "title": "Show Impact of Uncommitted Changes",
+        "category": "Sift",
+        "icon": "$(pulse)",
+        "enablement": "sift.active"
+      },
+      {
         "command": "sift.openCallSite",
         "title": "Go to Call Site",
         "category": "Sift",
@@ -224,6 +258,10 @@
         {
           "command": "sift.openSourceOfLogic",
           "when": "activeCustomEditorId == sift.logic || activeWebviewPanelId == sift.logic"
+        },
+        {
+          "command": "sift.showNeighbourhoodOfNode",
+          "when": "false"
         }
       ],
       "view/title": [
@@ -236,6 +274,16 @@
           "command": "sift.refreshStatus",
           "when": "view == sift.outOfDate && sift.active",
           "group": "navigation@2"
+        },
+        {
+          "command": "sift.showImpactOfChanges",
+          "when": "view == sift.outOfDate && sift.active",
+          "group": "secondary@1"
+        },
+        {
+          "command": "sift.showFlow",
+          "when": "view == sift.outOfDate && sift.active",
+          "group": "secondary@2"
         }
       ],
       "view/item/context": [
@@ -258,6 +306,11 @@
           "command": "sift.openCallSite",
           "when": "view =~ /sift.call(ers|ees)/ && viewItem =~ /sift.call(Unit|Node)/",
           "group": "inline"
+        },
+        {
+          "command": "sift.showNeighbourhoodOfNode",
+          "when": "view =~ /sift.call(ers|ees)/ && viewItem =~ /sift.call(Unit|Subject)/",
+          "group": "navigation@3"
         }
       ],
       "editor/title": [
@@ -292,6 +345,16 @@
           "command": "sift.showCallees",
           "when": "sift.active && resourceExtname =~ /\\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/",
           "group": "0_sift@2"
+        },
+        {
+          "command": "sift.showNeighbourhood",
+          "when": "sift.active && resourceExtname =~ /.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/",
+          "group": "0_sift@3"
+        },
+        {
+          "command": "sift.showImpact",
+          "when": "sift.active && resourceExtname =~ /.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/",
+          "group": "0_sift@4"
         }
       ],
       "explorer/context": [
@@ -363,6 +426,7 @@
     "@types/vscode": "1.100.0",
     "@vscode/test-electron": "3.1.0",
     "@vscode/vsce": "4.1.1",
+    "elkjs": "0.12.1",
     "esbuild": "0.28.2",
     "jsdom": "31.0.0",
     "preact": "11.2.0",

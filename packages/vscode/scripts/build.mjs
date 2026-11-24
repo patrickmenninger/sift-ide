@@ -4,6 +4,7 @@
 //   dist/server.mjs      `sift serve` with the engine, the TypeScript adapter, and the pinned
 //                        `typescript`, run as a child process with VS Code's own Node
 //   dist/webview.js/css  the logic document (Preact), loaded by the extension's webviews
+//   dist/graph.js/css    the graph views (Preact, elkjs layout)
 //   dist/lib.*.d.ts      TypeScript's default libraries, found next to the bundle
 //   prompts/ models/     read by the engine next to the bundle (`../prompts`, `../models`)
 //   rules/               the built-in rule packs
@@ -76,7 +77,7 @@ const server = {
 
 const webview = {
   ...common,
-  entryPoints: { webview: join(pkg, "src", "webview", "main.tsx") },
+  entryPoints: { webview: join(pkg, "src", "webview", "main.tsx"), graph: join(pkg, "src", "webview", "graph-main.tsx") },
   outdir: join(pkg, "dist"),
   platform: "browser",
   target: "es2022",

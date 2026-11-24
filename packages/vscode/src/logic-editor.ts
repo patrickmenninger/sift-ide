@@ -444,10 +444,11 @@ function toRange(r: SourceRange): vscode.Range {
   return new vscode.Range(r.start.line - 1, r.start.col - 1, r.end.line - 1, r.end.col - 1);
 }
 
-function documentHtml(webview: vscode.Webview, dist: vscode.Uri): string {
+/** A webview page loading one of the bundles in dist/ (`webview` for logic, `graph` for graph views). */
+export function documentHtml(webview: vscode.Webview, dist: vscode.Uri, entry: "webview" | "graph" = "webview", title = "Logic"): string {
   const nonce = randomBytes(16).toString("base64");
-  const script = webview.asWebviewUri(vscode.Uri.joinPath(dist, "webview.js"));
-  const style = webview.asWebviewUri(vscode.Uri.joinPath(dist, "webview.css"));
+  const script = webview.asWebviewUri(vscode.Uri.joinPath(dist, `${entry}.js`));
+  const style = webview.asWebviewUri(vscode.Uri.joinPath(dist, `${entry}.css`));
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -455,7 +456,7 @@ function documentHtml(webview: vscode.Webview, dist: vscode.Uri): string {
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; font-src ${webview.cspSource}; script-src 'nonce-${nonce}';">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <link rel="stylesheet" href="${style.toString()}">
-<title>Logic</title>
+<title>${title}</title>
 </head>
 <body>
 <div id="root"></div>

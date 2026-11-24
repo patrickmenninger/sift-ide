@@ -185,6 +185,7 @@ It starts Sift for each workspace folder with a `sift.config.yaml` (no `sift` on
 - the number of out-of-date or missing descriptions in the status bar, and a dot in the explorer on files whose logic is out of date or not described yet;
 - an **Out of Date** list in the Sift sidebar, grouped by reason;
 - **Callers** and **Callees** of the function at the cursor (editor context menu), with how each call was resolved and the calls Sift could not resolve;
+- **diagrams**: **Show Neighbourhood Diagram** (the function at the cursor with its callers, callees, interface implementations, routes, and events), **Show Route Flow…** (a route from its handler down to library calls, effects on each box), and **Show Impact of Changing This** / **Show Impact of Uncommitted Changes** (what may be affected, grouped by distance, with a diagram on request). Click a box to open its logic, Alt+click for its code, Shift+click for its neighbourhood; dashed lines are connections from a rule pack or a name match, and unresolved calls are listed rather than hidden;
 - **Sift: Describe This File** (editor title button), **Describe Folder** (explorer), and **Update Out-of-Date Descriptions**. Each first shows what will be sent to which models and asks; a running update can be cancelled, and the units already described are kept.
 
 `sift.updateOnSave: ask` offers an update after you save a file whose logic is now out of date. Sift never calls the AI without asking.
