@@ -29,6 +29,19 @@ export interface SiftConfig {
     tasks: Partial<Record<Task, Tier>>;
     tiers: Partial<Record<Tier, TierModel>>;
   };
+  /** Natural-language editing (phase-2-design §8.6). */
+  edit: {
+    /** Commands run against a copy of the project with a proposed change applied, only when the user asks. */
+    checks: EditCheckCommand[];
+    /** Each check is stopped after this long. */
+    checkTimeoutSeconds: number;
+  };
+}
+
+export interface EditCheckCommand {
+  /** Shown in the review; the command itself when not given. */
+  name: string;
+  command: string;
 }
 
 export function defaultConfig(): SiftConfig {
@@ -40,6 +53,7 @@ export function defaultConfig(): SiftConfig {
     lite: { maxStatements: 3 },
     batch: { maxUnits: 8 },
     models: { tasks: {}, tiers: {} },
+    edit: { checks: [], checkTimeoutSeconds: 300 },
   };
 }
 
@@ -61,7 +75,7 @@ export function parseConfig(text: string, sourceName = CONFIG_FILE): SiftConfig 
     throw new SiftError("CONFIG_INVALID", `${sourceName} must be a mapping of settings.`);
   }
 
-  checkKeys(raw, ["include", "exclude", "provider", "concurrency", "lite", "batch", "models"], "", problems);
+  checkKeys(raw, ["include", "exclude", "provider", "concurrency", "lite", "batch", "models", "edit"], "", problems);
 
   if ("include" in raw) config.include = stringList(raw.include, "include", problems, { nonEmpty: true });
   if ("exclude" in raw) config.exclude = stringList(raw.exclude, "exclude", problems);
@@ -85,6 +99,7 @@ export function parseConfig(text: string, sourceName = CONFIG_FILE): SiftConfig 
     } else problems.push("batch: must be a mapping");
   }
   if ("models" in raw) parseModels(raw.models, config, problems);
+  if ("edit" in raw) parseEdit(raw.edit, config, problems);
 
   if (problems.length > 0) {
     throw new SiftError("CONFIG_INVALID", `${sourceName} has ${problems.length} problem(s).`, problems);
@@ -135,6 +150,29 @@ function parseModels(value: unknown, config: SiftConfig, problems: string[]): vo
       }
     } else problems.push("models.tiers: must be a mapping of tier to model");
   }
+}
+
+function parseEdit(value: unknown, config: SiftConfig, problems: string[]): void {
+  if (!isRecord(value)) {
+    problems.push("edit: must be a mapping");
+    return;
+  }
+  checkKeys(value, ["checks", "checkTimeoutSeconds"], "edit.", problems);
+  if ("checks" in value) {
+    if (!Array.isArray(value.checks)) problems.push("edit.checks: must be a list of commands");
+    else {
+      value.checks.forEach((c: unknown, i) => {
+        const at = `edit.checks[${i}]`;
+        if (typeof c === "string" && c.trim() !== "") config.edit.checks.push({ name: c, command: c });
+        else if (isRecord(c) && typeof c.command === "string" && c.command.trim() !== "") {
+          checkKeys(c, ["name", "command"], `${at}.`, problems);
+          if (c.name !== undefined && (typeof c.name !== "string" || c.name.trim() === "")) problems.push(`${at}.name: must be a non-empty string`);
+          config.edit.checks.push({ name: typeof c.name === "string" && c.name.trim() !== "" ? c.name : c.command, command: c.command });
+        } else problems.push(`${at}: must be a command, or a mapping with "command" and optional "name"`);
+      });
+    }
+  }
+  if ("checkTimeoutSeconds" in value) config.edit.checkTimeoutSeconds = positiveInt(value.checkTimeoutSeconds, "edit.checkTimeoutSeconds", problems);
 }
 
 /** Walk up from `start` to the nearest directory containing sift.config.yaml. */

@@ -98,6 +98,56 @@ describe("sift serve protocol", () => {
     server.connection.dispose();
   }, 90_000);
 
+  it("proposes, applies, and undoes an edit, with progress and edit notifications", async () => {
+    const dir = await fixtureCopy();
+    const withdraw = `${SERVICE}#AccountService.withdraw`;
+    const provider = new FakeProvider((req) => {
+      if (req.task === "edit-plan") return { kind: "behavior", interpretation: "Reject non-positive amounts.", questions: [], warnings: [], allowedUnits: [{ unit: withdraw, reason: "edited" }], helpers: [], examples: [], broader: null };
+      if (req.task === "edit-code") {
+        const code = `async withdraw(userId: string, accountId: string, amountCents: number): Promise<Account> {\n  if (amountCents <= 0) throw new ValidationError("Amount must be positive");\n  const account = await this.repo.getAccount(accountId);\n  if (account.ownerId !== userId) {\n    throw new ForbiddenError("You can only withdraw from your own accounts");\n  }\n  account.balanceCents -= amountCents;\n  await this.repo.save(account);\n  return account;\n}`;
+        return { units: [{ unit: withdraw, text: code }], insertions: [], notes: "" };
+      }
+      if (req.task === "edit-verify") return { satisfied: true, gaps: [], unrequested: [] };
+      return answer(req);
+    });
+    const { client, server } = await connected(dir, provider);
+    await client.initialize();
+    await client.request("sift/generate", { paths: [SERVICE] });
+    const original = await readFile(join(dir, SERVICE), "utf8");
+
+    const progress: Notifications["sift/editProgress"][] = [];
+    const changes: WorkspaceChange[] = [];
+    client.on("sift/editProgress", (p) => progress.push(p));
+    client.on("sift/didChange", (c) => changes.push(c));
+
+    const draft = await client.request("sift/edit/create", { unit: "AccountService.withdraw", request: "Reject amounts of zero or less" });
+    expect(draft.state).toBe("draft");
+    const ready = await client.request("sift/edit/propose", { id: draft.id, token: "e1" });
+    expect(ready.state).toBe("ready");
+    expect(progress.map((p) => (p.event.type === "stage" ? p.event.stage : p.event.state))).toEqual(["planning", "coding", "validating", "describing", "verifying", "ready"]);
+    expect(changes).toContainEqual({ type: "edits", ids: [draft.id] });
+    expect((await client.request("sift/edit/list", { states: ["ready"] })).map((r) => r.id)).toEqual([draft.id]);
+
+    // The editor writes the source itself (its own undo stack); Sift checks it and writes the description.
+    const proposed = ready.proposal!.files[0]!.text;
+    await expect(client.request("sift/edit/apply", { id: draft.id, sourceWritten: true })).rejects.toThrow("does not hold the proposed change");
+    await writeFile(join(dir, SERVICE), proposed);
+    const applied = await client.request("sift/edit/apply", { id: draft.id, sourceWritten: true });
+    expect(applied.written).toEqual([`.sift/${SERVICE}.sift`]);
+    expect(changes).toContainEqual({ type: "descriptions", files: [`.sift/${SERVICE}.sift`] });
+    const logic = await client.request("sift/logicFile", { source: SERVICE });
+    expect(logic.units.find((u) => u.unit.symbol === "AccountService.withdraw")!.freshness).toBe("fresh");
+
+    // Undo restores what Sift wrote (the description); the source is the editor's to undo.
+    const undone = await client.request("sift/edit/undo", { id: draft.id });
+    expect(undone.restored).toEqual([`.sift/${SERVICE}.sift`]);
+    expect(await readFile(join(dir, SERVICE), "utf8")).toBe(proposed);
+    await writeFile(join(dir, SERVICE), original);
+    expect((await client.request("sift/status", { paths: [SERVICE] })).inSync).toBe(true);
+    client.dispose();
+    server.connection.dispose();
+  }, 90_000);
+
   it("runs as a process: sift serve on stdio", async () => {
     const dir = await fixtureCopy();
     expect((await sift(new FakeProvider((req) => answer(req)), "-C", dir, "status")).code).toBe(0);

@@ -116,6 +116,8 @@ interface WorkItem {
   mode: "describe" | "update" | "keep";
   reason: PlannedUnit["reason"];
   previous?: SiftUnit;
+  /** Added to the end of the prompt (an edit's request, for its re-derivation). */
+  note?: string;
 }
 
 export async function generate(options: GenerateOptions): Promise<GenerateReport> {
@@ -323,6 +325,54 @@ export async function generate(options: GenerateOptions): Promise<GenerateReport
   return report;
 }
 
+export interface RedescribeOptions {
+  root: string;
+  config: SiftConfig;
+  rules: RuleSet;
+  provider: Provider;
+  router: Router;
+  /** The code graph of the files on disk; calls are resolved through it. */
+  graph: CodeGraph;
+  /** Extractions to read signatures from: the proposed version of changed files, the disk version of the rest. */
+  extractions: Map<string, FileExtraction>;
+  /** Described units: "file#Symbol" → ID and summary. */
+  known: Map<string, { id: string; summary?: string }>;
+  file: string;
+  /** The unit as it is in the proposed code. */
+  unit: ExtractedUnit;
+  /** The description to update. Pieces marked `user-edited` are kept where accurate. */
+  previous: SiftUnit;
+  lite: boolean;
+  /** The proposed text of the whole file. */
+  fileText: string;
+  /** Added to the prompt, e.g. what was asked for. */
+  note?: string;
+  cache: SiftCache;
+  signal?: AbortSignal;
+}
+
+/**
+ * Describe a unit's proposed code with the update prompt, starting from `previous` (an edit's
+ * re-derivation, phase-2-design §8.7). Unchanged steps keep their text and IDs.
+ */
+export async function redescribeUnit(o: RedescribeOptions): Promise<{ unit: SiftUnit | null; report: GenerateReport }> {
+  const report: GenerateReport = {
+    planned: [], described: [], failed: [], unchanged: [], renamed: [], deleted: [], movedFiles: [], ambiguous: [], needsReview: [],
+    written: [], removed: [], replaced: [], redactions: 0, usage: { inputTokens: 0, outputTokens: 0, costUsd: 0, calls: 0 }, substitutions: [], belowMinimum: [],
+  };
+  const ref = unitId(o.file, o.unit.symbol);
+  const item: WorkItem = { file: o.file, unit: o.unit, ref, id: o.previous.id, lite: o.lite, mode: "update", reason: "changed", previous: o.previous, ...(o.note ? { note: o.note } : {}) };
+  const known = new Map(o.known);
+  const ctx: Context = {
+    graph: o.graph, rules: o.rules, extractions: o.extractions, known, before: new Map(known), cycles: new CycleIndex(o.graph), provider: o.provider, router: o.router,
+    report, emit: () => {}, textOf: async (file) => (file === o.file ? o.fileText : readFile(join(o.root, file), "utf8")), cache: o.cache, substitutions: new Map(), abort: null,
+    ...(o.signal ? { signal: o.signal } : {}),
+  };
+  const unit = await describeOne(item, ctx);
+  if (ctx.abort) throw ctx.abort;
+  return { unit, report };
+}
+
 interface Context {
   graph: CodeGraph;
   rules: RuleSet;
@@ -484,7 +534,10 @@ async function prepareDescribe(item: WorkItem, ctx: Context): Promise<PreparedDe
     const index = (steps: SiftStep[]): void => steps.forEach((s) => (ids.add(s.id), index(s.steps)));
     index(item.previous!.steps);
   }
-  return { task, template, schema, nodeEffects, prompt: input.prompt, updating, previousStepIds };
+  const prompt = item.note ? `${input.prompt}
+
+${item.note}` : input.prompt;
+  return { task, template, schema, nodeEffects, prompt, updating, previousStepIds };
 }
 
 function checkDescribe(item: WorkItem, prep: PreparedDescribe, json: unknown): { value: DescribeValue | null; problems: string[]; soft: boolean } {

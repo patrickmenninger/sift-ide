@@ -10,7 +10,7 @@ import { parseSiftText, updateSiftText } from "./sift-yaml.js";
 export const SIFT_EXTENSION = ".sift";
 
 /** Directories and files inside .sift/ that are not logic files. */
-const RESERVED = new Set([".cache", "rules", "models.local.yaml"]);
+const RESERVED = new Set([".cache", "edits", "rules", "models.local.yaml"]);
 
 /**
  * Project-relative path of the `.sift` file for a source file. The whole source path is mirrored

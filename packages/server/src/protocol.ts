@@ -1,4 +1,8 @@
 import type {
+  ChangeRequest,
+  DescriptionEdit,
+  EditEvent,
+  EditState,
   Effect,
   FileExtraction,
   FlowResult,
@@ -49,6 +53,20 @@ export interface Requests {
   /** Progress arrives as `sift/generateProgress` notifications carrying the request's `token`. */
   "sift/generate": { params: { paths?: string[]; force?: boolean; dryRun?: boolean; token?: string }; result: GenerateReport };
   "sift/verify": { params: { targets: string[] }; result: VerifyResult };
+  // Editing (phase-2-design §8). Progress of a propose arrives as `sift/editProgress` with its `token`;
+  // cancelling a propose or runChecks request stops it.
+  "sift/edit/create": { params: { unit: string; edits?: DescriptionEdit[]; request?: string }; result: ChangeRequest };
+  "sift/edit/update": { params: { id: string; edits?: DescriptionEdit[]; request?: string | null }; result: ChangeRequest };
+  "sift/edit/get": { params: { id: string }; result: ChangeRequest };
+  "sift/edit/list": { params: { states?: EditState[] }; result: ChangeRequest[] };
+  "sift/edit/propose": { params: { id: string; token?: string }; result: ChangeRequest };
+  "sift/edit/answer": { params: { id: string; answers: { questionId: string; answer: string }[] }; result: ChangeRequest };
+  "sift/edit/runChecks": { params: { id: string }; result: ChangeRequest };
+  /** With `sourceWritten`, the client already wrote the source (through its own undo stack); only descriptions are written. */
+  "sift/edit/apply": { params: { id: string; confirmBroader?: boolean; sourceWritten?: boolean }; result: { request: ChangeRequest; written: string[] } };
+  "sift/edit/reject": { params: { id: string }; result: ChangeRequest };
+  "sift/edit/rebase": { params: { id: string }; result: ChangeRequest };
+  "sift/edit/undo": { params: { id: string }; result: { request: ChangeRequest; restored: string[] } };
 }
 
 export type RequestMethod = keyof Requests;
@@ -57,6 +75,7 @@ export type RequestMethod = keyof Requests;
 export interface Notifications {
   "sift/didChange": WorkspaceChange;
   "sift/generateProgress": { token: string; event: GenerateEvent };
+  "sift/editProgress": { token: string; event: EditEvent };
 }
 
 /** JSON-RPC error code for Sift's own errors; `data` carries the SiftError code and details. */
