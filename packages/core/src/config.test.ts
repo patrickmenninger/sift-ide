@@ -32,6 +32,11 @@ models:
   tasks: { describe: mid }
   tiers:
     small: { model: claude-haiku-5-5, effort: low }
+edit:
+  checks:
+    - { name: lint, command: npm run lint }
+    - npx vitest related
+  checkTimeoutSeconds: 60
 `);
     expect(config).toEqual({
       include: ["lib/**"],
@@ -44,6 +49,7 @@ models:
         tasks: { describe: "mid" },
         tiers: { small: { model: "claude-haiku-5-5", effort: "low" } },
       },
+      edit: { checks: [{ name: "lint", command: "npm run lint" }, { name: "npx vitest related", command: "npx vitest related" }], checkTimeoutSeconds: 60 },
     });
   });
 
@@ -59,11 +65,11 @@ models:
     mid: { model: x, effort: turbo }
 `);
     expect(problems).toEqual([
-      "concurency: unknown setting (expected one of include, exclude, provider, concurrency, lite, batch, models)",
+      "concurency: unknown setting (expected one of include, exclude, provider, concurrency, lite, batch, models, edit)",
       "include: must contain at least one pattern",
       "concurrency: must be a positive whole number",
       "models.tasks.describe: must be one of frontier, mid, small",
-      "models.tasks.summarize: unknown task (expected one of describe, describe-lite, update, context-check, judge)",
+      "models.tasks.summarize: unknown task (expected one of describe, describe-lite, update, context-check, judge, edit-plan, edit-code, edit-verify, edit-judge)",
       "models.tiers.small.model: must be a non-empty string",
       "models.tiers.mid.effort: must be one of low, medium, high, xhigh, max",
     ]);

@@ -1,6 +1,6 @@
 {
   "name": "@sift/cli",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "The sift command.",
   "type": "module",
@@ -10,11 +10,13 @@
   "main": "./dist/program.js",
   "types": "./dist/program.d.ts",
   "dependencies": {
-    "@sift/adapter-typescript": "0.1.0",
-    "@sift/core": "0.1.0",
-    "@sift/eval": "0.1.0",
-    "@sift/provider-claude-code": "0.1.0",
-    "@sift/rules": "0.1.0",
+    "@sift/adapter-typescript": "0.2.0",
+    "@sift/core": "0.2.0",
+    "@sift/eval": "0.2.0",
+    "@sift/mcp": "0.2.0",
+    "@sift/provider-claude-code": "0.2.0",
+    "@sift/rules": "0.2.0",
+    "@sift/server": "0.2.0",
     "commander": "^15.1.0"
   }
 }

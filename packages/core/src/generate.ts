@@ -24,7 +24,8 @@ import { loadPrompt, type PromptTemplate } from "./prompts.js";
 import type { CompletionResult, Provider, Task, Tier } from "./provider.js";
 import type { Route, Router } from "./routing.js";
 import type { RuleSet } from "./rules.js";
-import { SIFT_SCHEMA_VERSION, type Effect, type SiftFile, type SiftStep, type SiftUnit } from "./schema.js";
+import { carryProvenance, hasPersonWording, keepsPersonWording } from "./provenance.js";
+import { requiredSchemaVersion, SIFT_SCHEMA_VERSION, type Effect, type SiftFile, type SiftStep, type SiftUnit } from "./schema.js";
 import { deleteSiftFile, writeSiftFile } from "./store.js";
 import { calleeRefsOf, CycleIndex, describedUnits, expectedContextHash, planSync, stronglyConnected, type Ambiguity, type UnitChange } from "./sync.js";
 import { lineDiff } from "./text-diff.js";
@@ -51,6 +52,11 @@ export interface GenerateOptions {
   dryRun?: boolean;
   fullHash?: boolean;
   onEvent?: (event: GenerateEvent) => void;
+  /**
+   * Stops the run: no new AI calls start and running ones are cancelled. Units already described
+   * are written; the rest keep their previous descriptions, and the report says `cancelled`.
+   */
+  signal?: AbortSignal;
 }
 
 export type GenerateAction = "describe" | "update" | "context-check";
@@ -96,6 +102,8 @@ export interface GenerateReport {
   usage: { inputTokens: number; outputTokens: number; costUsd: number; calls: number };
   substitutions: { from: Tier; to: Tier; model: string }[];
   belowMinimum: string[];
+  /** Set when `signal` stopped the run before every planned unit was described. */
+  cancelled?: true;
 }
 
 interface WorkItem {
@@ -108,6 +116,8 @@ interface WorkItem {
   mode: "describe" | "update" | "keep";
   reason: PlannedUnit["reason"];
   previous?: SiftUnit;
+  /** Added to the end of the prompt (an edit's request, for its re-derivation). */
+  note?: string;
 }
 
 export async function generate(options: GenerateOptions): Promise<GenerateReport> {
@@ -188,7 +198,13 @@ export async function generate(options: GenerateOptions): Promise<GenerateReport
   const results = new Map<string, SiftUnit>();
   const ctx: Context = {
     graph, rules, extractions, known, before, cycles, provider, router, report, emit, textOf, cache, substitutions: new Map(), abort: null,
+    ...(options.signal ? { signal: options.signal } : {}),
   };
+  const onAbort = () => {
+    ctx.abort ??= new SiftError("CANCELLED", "Cancelled.");
+  };
+  if (options.signal?.aborted) onAbort();
+  options.signal?.addEventListener("abort", onAbort);
 
   // Units to describe or update are batched per file and task (one AI call each, up to
   // batch.maxUnits units); kept units are handled one by one. Batches run callees before callers,
@@ -282,7 +298,10 @@ export async function generate(options: GenerateOptions): Promise<GenerateReport
     }
     // fileHash says "this .sift file matches the source"; it is only updated when every unit does.
     const fileHash = current || !old ? extraction.fileHash : old.fileHash;
-    const next: SiftFile = { sift: SIFT_SCHEMA_VERSION, source: file, language: extraction.language, fileHash, units };
+    // An existing file keeps its schema version; the serializer raises it only when its content needs it.
+    const version = old?.sift ?? (moved ? existing.get(moved.from)?.sift : undefined) ?? SIFT_SCHEMA_VERSION;
+    const next: SiftFile = { sift: version, source: file, language: extraction.language, fileHash, units };
+    next.sift = Math.max(next.sift, requiredSchemaVersion(next));
     validateSiftFile(JSON.parse(JSON.stringify(next)), file);
     const written = await writeSiftFile(root, next);
     if (written.changed) report.written.push(written.path);
@@ -290,6 +309,11 @@ export async function generate(options: GenerateOptions): Promise<GenerateReport
   }
   for (const file of plan.deletedFiles) if (await deleteSiftFile(root, file)) report.removed.push(file);
 
+  options.signal?.removeEventListener("abort", onAbort);
+  if (ctx.abort?.code === "CANCELLED") {
+    report.cancelled = true;
+    return report;
+  }
   if (ctx.abort) throw ctx.abort;
   // Old unit sources are kept only while a description still refers to them.
   if (!options.paths?.length) {
@@ -299,6 +323,54 @@ export async function generate(options: GenerateOptions): Promise<GenerateReport
     await cache.pruneUnitSources(keep);
   }
   return report;
+}
+
+export interface RedescribeOptions {
+  root: string;
+  config: SiftConfig;
+  rules: RuleSet;
+  provider: Provider;
+  router: Router;
+  /** The code graph of the files on disk; calls are resolved through it. */
+  graph: CodeGraph;
+  /** Extractions to read signatures from: the proposed version of changed files, the disk version of the rest. */
+  extractions: Map<string, FileExtraction>;
+  /** Described units: "file#Symbol" → ID and summary. */
+  known: Map<string, { id: string; summary?: string }>;
+  file: string;
+  /** The unit as it is in the proposed code. */
+  unit: ExtractedUnit;
+  /** The description to update. Pieces marked `user-edited` are kept where accurate. */
+  previous: SiftUnit;
+  lite: boolean;
+  /** The proposed text of the whole file. */
+  fileText: string;
+  /** Added to the prompt, e.g. what was asked for. */
+  note?: string;
+  cache: SiftCache;
+  signal?: AbortSignal;
+}
+
+/**
+ * Describe a unit's proposed code with the update prompt, starting from `previous` (an edit's
+ * re-derivation, phase-2-design §8.7). Unchanged steps keep their text and IDs.
+ */
+export async function redescribeUnit(o: RedescribeOptions): Promise<{ unit: SiftUnit | null; report: GenerateReport }> {
+  const report: GenerateReport = {
+    planned: [], described: [], failed: [], unchanged: [], renamed: [], deleted: [], movedFiles: [], ambiguous: [], needsReview: [],
+    written: [], removed: [], replaced: [], redactions: 0, usage: { inputTokens: 0, outputTokens: 0, costUsd: 0, calls: 0 }, substitutions: [], belowMinimum: [],
+  };
+  const ref = unitId(o.file, o.unit.symbol);
+  const item: WorkItem = { file: o.file, unit: o.unit, ref, id: o.previous.id, lite: o.lite, mode: "update", reason: "changed", previous: o.previous, ...(o.note ? { note: o.note } : {}) };
+  const known = new Map(o.known);
+  const ctx: Context = {
+    graph: o.graph, rules: o.rules, extractions: o.extractions, known, before: new Map(known), cycles: new CycleIndex(o.graph), provider: o.provider, router: o.router,
+    report, emit: () => {}, textOf: async (file) => (file === o.file ? o.fileText : readFile(join(o.root, file), "utf8")), cache: o.cache, substitutions: new Map(), abort: null,
+    ...(o.signal ? { signal: o.signal } : {}),
+  };
+  const unit = await describeOne(item, ctx);
+  if (ctx.abort) throw ctx.abort;
+  return { unit, report };
 }
 
 interface Context {
@@ -316,8 +388,9 @@ interface Context {
   cache: SiftCache;
   /** Tier → tier used instead, once a model turned out to be unavailable in this run. */
   substitutions: Map<Tier, Tier>;
-  /** Set when the run must stop (e.g. not logged in); remaining units are skipped. */
+  /** Set when the run must stop (not logged in, or cancelled); remaining units are skipped. */
   abort: SiftError | null;
+  signal?: AbortSignal;
 }
 
 async function processItem(item: WorkItem, ctx: Context): Promise<SiftUnit | null> {
@@ -395,18 +468,22 @@ async function contextCheck(item: WorkItem, kept: SiftUnit, changes: { name: str
       apply(s.steps);
     });
   apply(updated.steps);
-  if (changed) markEdited(updated, item, ctx);
+  if (changed) markReworded(updated, kept, item, ctx);
   ctx.report.described.push({ unit: item.ref, action: "context-check", stale: updated.status === "stale", uncovered: [], warnings: updated.warnings.length, attempts: outcome.attempts, changed });
   ctx.emit({ type: "described", unit: item.ref, action: "context-check", task, model: outcome.route.choice.model, attempts: outcome.attempts, stale: updated.status === "stale", changed, durationMs: Date.now() - started });
   return updated;
 }
 
-/** After the AI changed a kept description's wording: a person's wording goes to review; verified no longer holds. */
-function markEdited(unit: SiftUnit, item: WorkItem, ctx: Context): void {
-  if (item.previous?.status === "user-edited") {
+/**
+ * After a context check reworded a unit whose code did not change: rewording a person's text sends
+ * the unit to review; reworded steps lose their status, and a verified unit is no longer verified.
+ */
+function markReworded(unit: SiftUnit, previous: SiftUnit, item: WorkItem, ctx: Context): void {
+  carryProvenance(previous, unit, { keepVerified: true });
+  if (hasPersonWording(previous) && !keepsPersonWording(previous, unit)) {
     unit.status = "stale";
     ctx.report.needsReview.push(item.ref);
-  } else if (unit.status === "verified" || unit.status === "user-edited") unit.status = "generated";
+  } else if (unit.status === "verified") unit.status = "generated";
 }
 
 /** Everything needed to ask for, check, and turn into a unit one describe or update response. */
@@ -457,7 +534,10 @@ async function prepareDescribe(item: WorkItem, ctx: Context): Promise<PreparedDe
     const index = (steps: SiftStep[]): void => steps.forEach((s) => (ids.add(s.id), index(s.steps)));
     index(item.previous!.steps);
   }
-  return { task, template, schema, nodeEffects, prompt: input.prompt, updating, previousStepIds };
+  const prompt = item.note ? `${input.prompt}
+
+${item.note}` : input.prompt;
+  return { task, template, schema, nodeEffects, prompt, updating, previousStepIds };
 }
 
 function checkDescribe(item: WorkItem, prep: PreparedDescribe, json: unknown): { value: DescribeValue | null; problems: string[]; soft: boolean } {
@@ -605,29 +685,21 @@ function finishDescribe(
   });
   setContextHash(unit, expectedContextHash(calleeRefsOf(item.unit, item.ref, ctx.graph, ctx.cycles), ctx.known));
   let changed = true;
-  if (updating && item.previous!.status === "user-edited") {
-    if (unit.status !== "stale" && keepsWording(item.previous!, unit)) unit.status = "user-edited";
-    else markEdited(unit, item, ctx);
+  if (updating) {
+    const previous = item.previous!;
+    // The code changed, so nothing stays verified; a person's wording stays theirs while unchanged.
+    carryProvenance(previous, unit, { keepVerified: false });
+    if (hasPersonWording(previous)) {
+      if (unit.status === "stale" || !keepsPersonWording(previous, unit)) {
+        unit.status = "stale";
+        ctx.report.needsReview.push(item.ref);
+      } else if (previous.status === "user-edited") unit.status = "user-edited";
+    }
+    changed = JSON.stringify(proseOf(previous)) !== JSON.stringify(proseOf(unit));
   }
-  if (updating) changed = JSON.stringify(proseOf(item.previous!)) !== JSON.stringify(proseOf(unit));
   ctx.report.described.push({ unit: item.ref, action: item.mode as GenerateAction, stale: unit.status === "stale", uncovered, warnings: unit.warnings.length, attempts: outcome.attempts, changed });
   ctx.emit({ type: "described", unit: item.ref, action: item.mode as GenerateAction, task, model: outcome.route.choice.model, attempts: outcome.attempts, stale: unit.status === "stale", changed, durationMs: Date.now() - started });
   return unit;
-}
-
-/** True when every piece of a person's wording that the update kept is unchanged. */
-function keepsWording(previous: SiftUnit, next: SiftUnit): boolean {
-  if (previous.summary !== next.summary) return false;
-  if (previous.returns && next.returns && previous.returns.meaning !== next.returns.meaning) return false;
-  for (const i of previous.inputs) {
-    const now = next.inputs.find((n) => n.name === i.name);
-    if (now && now.meaning !== i.meaning) return false;
-  }
-  const old = new Map<string, string>();
-  const index = (steps: SiftStep[]): void => steps.forEach((s) => (old.set(s.id, s.text), index(s.steps)));
-  index(previous.steps);
-  const check = (steps: SiftStep[]): boolean => steps.every((s) => (!old.has(s.id) || old.get(s.id) === s.text) && check(s.steps));
-  return check(next.steps);
 }
 
 /** The AI-written parts of a unit, to tell whether an update changed any wording. */
@@ -683,6 +755,8 @@ async function askWithRetry<T>(
       ctx.abort ??= err;
       return null;
     }
+    // A call cut short by cancelling is not a failure of this unit.
+    if (ctx.abort) return null;
     fail(item, ctx, err instanceof Error ? err.message : String(err), []);
   }
   return null;
@@ -706,8 +780,10 @@ async function completeWithFallback(
   const tried = new Set<Tier>();
   for (;;) {
     tried.add(current.tier);
+    // Nothing new starts once the run is stopping.
+    if (ctx.abort) throw ctx.abort;
     try {
-      const result = await ctx.provider.complete({ ...request, model: current.choice });
+      const result = await ctx.provider.complete({ ...request, model: current.choice, ...(ctx.signal ? { signal: ctx.signal } : {}) });
       ctx.report.usage.calls++;
       ctx.report.usage.inputTokens += result.usage.inputTokens ?? 0;
       ctx.report.usage.outputTokens += result.usage.outputTokens ?? 0;

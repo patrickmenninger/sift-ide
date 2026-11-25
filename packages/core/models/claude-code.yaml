@@ -1,7 +1,7 @@
 # Tier → model for the claude-code provider (design §4.2). Filled from evaluation results (§13.4).
 provider: claude-code
 tiers:
-  frontier: { model: claude-opus-5-5, effort: medium, effortByTask: { judge: high } }
+  frontier: { model: claude-opus-5-5, effort: medium, effortByTask: { judge: high, edit-judge: high, edit-plan: high, edit-code: high } }
   mid: { model: claude-sonnet-5-5, effort: medium }
   small: { model: claude-haiku-5-5, effort: low }
 fallback:

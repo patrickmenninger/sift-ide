@@ -81,20 +81,22 @@ export async function loadChurnEdits(evalDir: string, fixture: string): Promise<
   return edits;
 }
 
-export async function loadMatrix(evalDir: string): Promise<MatrixConfig[]> {
+/** The configurations in eval/matrix.yaml: `configs` for descriptions, `edits` for the edit evaluation. */
+export async function loadMatrix(evalDir: string, section: "configs" | "edits" = "configs"): Promise<MatrixConfig[]> {
   const path = join(evalDir, "matrix.yaml");
   const raw = await readYaml(path);
-  if (!isRecord(raw) || !Array.isArray(raw.configs) || raw.configs.length === 0) throw invalid(path, ['expected a non-empty "configs" list']);
+  const list = isRecord(raw) ? raw[section] : undefined;
+  if (!Array.isArray(list) || list.length === 0) throw invalid(path, [`expected a non-empty "${section}" list`]);
   const problems: string[] = [];
-  const configs = raw.configs.map((c: unknown, i: number): MatrixConfig => {
+  const configs = list.map((c: unknown, i: number): MatrixConfig => {
     if (!isRecord(c) || typeof c.name !== "string") {
-      problems.push(`configs[${i}].name must be a string`);
+      problems.push(`${section}[${i}].name must be a string`);
       return DEFAULT_CONFIG;
     }
     const tasks: Partial<Record<Task, Tier>> = {};
     for (const [task, tier] of Object.entries(isRecord(c.tasks) ? c.tasks : {})) {
-      if (!(TASKS as readonly string[]).includes(task)) problems.push(`configs[${i}].tasks: unknown task "${task}"`);
-      else if (!(TIERS as readonly unknown[]).includes(tier)) problems.push(`configs[${i}].tasks.${task}: unknown tier "${String(tier)}"`);
+      if (!(TASKS as readonly string[]).includes(task)) problems.push(`${section}[${i}].tasks: unknown task "${task}"`);
+      else if (!(TIERS as readonly unknown[]).includes(tier)) problems.push(`${section}[${i}].tasks.${task}: unknown tier "${String(tier)}"`);
       else tasks[task as Task] = tier as Tier;
     }
     return { name: c.name, tasks };

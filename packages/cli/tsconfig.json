@@ -8,7 +8,8 @@
     "src"
   ],
   "exclude": [
-    "src/**/*.test.ts"
+    "src/**/*.test.ts",
+    "src/test-helpers.ts"
   ],
   "references": [
     {
@@ -22,6 +23,12 @@
     },
     {
       "path": "../../eval/harness"
+    },
+    {
+      "path": "../server"
+    },
+    {
+      "path": "../mcp-server"
     }
   ]
 }

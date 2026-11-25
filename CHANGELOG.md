@@ -2,6 +2,40 @@
 
 All notable changes to Sift are recorded here. Versions follow the roadmap phases in [requirements.md](requirements.md): each phase ends with a minor release on `main`.
 
+## 0.2.0 — Phase 2: MCP Server, VS Code Extension, Natural-Language Editing
+
+Sift in front of AI coding agents (an MCP server) and developers (a VS Code extension), and the reverse direction: edit what a function should do and Sift proposes the code change for review. Design: [docs/phase-2-design.md](docs/phase-2-design.md).
+
+### Added
+
+- **Workspace** (`@sift/core`): one long-lived engine behind the CLI and editors, with logic files and their freshness, step ↔ source ranges, the step at a source position, navigation targets for a step's calls, and change notifications.
+- **`sift flow <route>`**: what an HTTP route does, from its handler down to the library calls, with effects. A route registered as an inline callback is followed only through that callback.
+- **`sift verify`**: mark units or whole files as checked by a person; descriptions that don't match the current code are refused.
+- **`.sift` schema 1**: step-level `status` (`user-edited`, `verified`), a unit's `userEdited` fields, and `resolved` warnings. Sync protects exactly the wording a person wrote. Files stay at schema 0 until they need a schema 1 field; `sift migrate` upgrades them all at once.
+- **`sift serve`** and `@sift/server`: the workspace over JSON-RPC on stdio, with a typed client, for the VS Code extension.
+- **`sift mcp`** and `@sift/mcp`: an MCP server for AI coding agents with `sift_describe`, `sift_find`, `sift_callers`, `sift_callees`, `sift_impact`, `sift_flow`, and `sift_status`, plus `sift://file/<path>` resources. Read-only; stale descriptions are always marked; lists are capped at 50 items. `--allow-generate` adds `sift_generate`.
+- **Natural-language editing** (`sift edit`): a change request (a step, summary, or input rewritten, steps added or removed, or a free-form request) is planned (`edit-plan`, with clarifying questions), coded for the unit only (`edit-code`), checked (parse, type-check through adapter overlays, scope against the graph), re-described, and compared with the request (`edit-verify`), then shown for review. `apply` writes the code and the description; `undo` restores both only if nothing changed them since. Rewordings that don't change behaviour are kept only if still accurate. Broader changes need `--confirm-broader`; requests whose code moved are marked for review and re-planned. `edit.checks` runs configured commands against a copy of the project on request. Requests are stored in `.sift/edits/`.
+- **VS Code extension** (`packages/vscode`, built as a `.vsix` with `npm run package:vscode`): runs the bundled engine (`sift serve`) for each folder with a `sift.config.yaml`, restarting it after a crash; a status bar count and explorer dots for out-of-date or missing logic; Out of Date, Callers, and Callees views; Describe This File / Folder and Update Out-of-Date Descriptions, each with an estimate first and cancellable; `sift.updateOnSave: ask`; Sift: Initialize.
+- **Logic documents** in the VS Code extension: **Sift: Open Logic** (`Ctrl+Alt+L`) shows a source file's logic beside it, and `.sift` files open as logic documents. Status badges, faint unverified text, and **Verify** per unit; step ↔ source highlighting both ways; Ctrl+click on a step follows its call (with an implementation picker), Alt+click opens the callee's code, and a hover card shows each call's target, including library calls and their effects. The document says when the source has unsaved changes.
+- **Graph views** in the VS Code extension: **Show Neighbourhood Diagram** for the function at the cursor (callers, callees, interface members and their implementations, routes, events), **Show Route Flow…** (from the handler down to library calls, with effects as chips), and **Show Impact of Changing This** / **Show Impact of Uncommitted Changes** (a list grouped by distance with the weakest confidence per path, and an optional diagram). Laid out with elkjs; weaker connections are dashed; unresolved calls appear as their own node; every unit opens its logic on click (Alt+click: code, Shift+click: its neighbourhood) and a route opens its flow. Views redraw when the project's status refreshes.
+- **Editing in VS Code**: **Edit** on a unit in its logic document (or **Sift: Edit Logic of This…**) makes its summary, input and return meanings, and steps editable in place, with steps added and removed, and a free-form request. Drafts are kept as change requests. **Propose change** shows its progress and can be cancelled; the plan's questions are answered in the document. The **review** panel shows the interpretation and answers, the logic diff word by word, the source diff (with VS Code's diff editor), the scope, the checks (with **Run configured checks**), and the intent check's gaps and unrequested changes; a broader change asks for a second confirmation. **Approve and apply** writes the source through a `WorkspaceEdit` (VS Code's undo works) and then the description; **Sift: Undo Edit…** restores both. A change whose code moved is shown as **Code changed** with **Re-plan on the current code**.
+- **Edit evaluation**: `sift eval --edits` runs the scripted change requests in `eval/edits/bank-app.yaml` (step rewrites, added and deleted steps, free-form and ambiguous requests, a type change that reaches a caller, an interface implementation, accurate and false rewordings) up to review and scores type-checks, targeting, intent (an `edit-judge` task on the frontier tier), question recall, unneeded questions, rewording, cost, and latency; `--matrix` reads the `edits` configurations.
+- `sift/edit/apply` takes `sourceBefore` with `sourceWritten`: what the editor replaced, so `undo` restores the source too.
+- **CI** (`.github/workflows/ci.yml`): `npm run verify` and the extension integration tests on Windows, macOS, and Linux; the `.vsix` is built on Linux.
+- Cancelling a generate run: `sift/generate` stops on `$/cancelRequest` (core takes an `AbortSignal`). Units already described are written and the report says `cancelled`.
+
+### Changed
+
+- Every CLI command runs through the workspace.
+- `sift/initialize` also reports the project's AI provider and whether it keeps code on the machine.
+
+### Known limits
+
+- Edits replace units (functions, methods, components) and may add imports; a change that needs an interface, type alias, or class declaration edited first stops with an explanation.
+- The extension and CLI are installed from this repository (`.vsix` and `npm link`); nothing is published yet.
+
+Edit baseline on the bank-app fixture (planning and code on Claude Opus 5.5, describing and the intent check on Sonnet 5.5): type-checks 100%, targeted 100%, intent acceptable 100% with none wrong, question recall 100%, unneeded questions 0%, rewording 100%; about $0.10 and 18 s of AI time per edit at API prices. 16 of 17 cases reached review; the one that needs an interface change stopped with an explanation.
+
 ## 0.1.0 — Phase 1: Derivation Engine
 
 First release: a command-line tool that reads a TypeScript/JavaScript project and keeps `.sift` files — natural-language descriptions of every function — in sync with the code. Design: [docs/design.md](docs/design.md).

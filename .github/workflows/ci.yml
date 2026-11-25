@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+jobs:
+  verify:
+    name: verify (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run verify
+      - name: Cache VS Code for the integration tests
+        uses: actions/cache@v4
+        with:
+          path: packages/vscode/.vscode-test
+          key: vscode-test-${{ runner.os }}-${{ hashFiles('packages/vscode/package.json') }}
+      - name: Extension integration tests (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm run test:vscode
+      - name: Extension integration tests
+        if: runner.os != 'Linux'
+        run: npm run test:vscode
+      - name: Package the extension
+        if: runner.os == 'Linux'
+        run: npm run package:vscode
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Linux'
+        with:
+          name: sift-vsix
+          path: packages/vscode/sift.vsix

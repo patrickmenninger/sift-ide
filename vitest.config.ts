@@ -10,10 +10,14 @@ export default defineConfig({
       "@sift/core": pkg("core"),
       "@sift/adapter-typescript": pkg("adapter-typescript"),
       "@sift/provider-claude-code": pkg("provider-claude-code"),
+      "@sift/server": pkg("server"),
+      "@sift/mcp": pkg("mcp-server"),
       "@sift/eval": fileURLToPath(new URL("./eval/harness/src/index.ts", import.meta.url)),
     },
   },
   test: {
-    include: ["packages/*/src/**/*.test.ts", "eval/harness/src/**/*.test.ts"],
+    include: ["packages/*/src/**/*.test.ts", "packages/*/src/**/*.test.tsx", "eval/harness/src/**/*.test.ts"],
+    // Fixture tests build a TypeScript program each; run side by side they can take well over the 5s default.
+    testTimeout: 30_000,
   },
 });

@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { extname, isAbsolute, join, resolve } from "node:path";
 import ts from "typescript";
 import {
@@ -7,6 +7,7 @@ import {
   type AdapterProject,
   type CallArg,
   type CallSite,
+  type Diagnostic,
   type ExtractedUnit,
   type FileExtraction,
   type SymbolRef,
@@ -67,19 +68,135 @@ function isAbstractMember(node: ts.Node): boolean {
   return ts.isMethodDeclaration(node) && !node.body && (ts.getModifiers(node) ?? []).some((m) => m.kind === ts.SyntaxKind.AbstractKeyword);
 }
 
+/**
+ * Where a project's files and settings come from, so an open project can follow the disk
+ * (phase-2-design §4: the adapter project stays open between requests).
+ */
+export interface ProjectSource {
+  /** The program's root files: the tsconfig's files plus the given source files (absolute paths). */
+  rootNames(files: string[]): string[];
+  /** Changes when the project must be opened again (tsconfig or jsconfig edited, added, or removed). */
+  stamp(): string;
+}
+
 export class TsProject implements AdapterProject, CallResolver {
-  private readonly checker: ts.TypeChecker;
+  private checker: ts.TypeChecker;
   private readonly liteMaxStatements: number;
   private implementationIndex: Map<string, ts.ClassLikeDeclaration[]> | undefined;
   private unitNameIndex: Map<string, SymbolRef[]> | undefined;
+  /** The last program built with overlays, reused while the same overlays are asked about. */
+  private overlaid: { key: string; base: ts.Program; program: ts.Program } | undefined;
+  private readonly stampAtOpen: string | undefined;
+  private readonly seen: SeenFiles = new Map();
 
   constructor(
     private readonly root: string,
-    private readonly program: ts.Program,
-    options: AdapterOptions = {},
+    private program: ts.Program,
+    private readonly adapterOptions: AdapterOptions = {},
+    private readonly source?: ProjectSource,
   ) {
     this.checker = program.getTypeChecker();
-    this.liteMaxStatements = options.liteMaxStatements ?? 3;
+    this.liteMaxStatements = adapterOptions.liteMaxStatements ?? 3;
+    this.stampAtOpen = source?.stamp();
+  }
+
+  refresh(files: string[]): boolean {
+    if (!this.source || this.source.stamp() !== this.stampAtOpen) return false;
+    const rootNames = this.source.rootNames(files.map((f) => resolve(this.root, f)));
+    this.setProgram(rebuild(this.program, rootNames, new Map(), this.seen));
+    return true;
+  }
+
+  extractText(path: string, text: string): FileExtraction {
+    const program = this.withOverlays(new Map([[path, text]]));
+    return new TsProject(this.root, program, this.adapterOptions).extractFile(path);
+  }
+
+  diagnostics(overlays: Map<string, string>, files: string[]): Diagnostic[] {
+    const after = this.withOverlays(overlays);
+    const before = this.overlaid!.base;
+    const changed = new Set([...overlays.keys()].map((p) => this.abs(p)));
+    const targets = new Set([...changed, ...files.map((p) => this.abs(p))]);
+    // Files that import a changed file can break with it (a changed signature or export).
+    const checker = after.getTypeChecker();
+    for (const sf of after.getSourceFiles()) {
+      if (!this.isProjectFile(sf) || targets.has(normal(sf.fileName))) continue;
+      const imports = sf.statements.some(
+        (s) =>
+          (ts.isImportDeclaration(s) || ts.isExportDeclaration(s)) &&
+          s.moduleSpecifier !== undefined &&
+          changed.has(normal(checker.getSymbolAtLocation(s.moduleSpecifier)?.valueDeclaration?.getSourceFile().fileName ?? "")),
+      );
+      if (imports) targets.add(normal(sf.fileName));
+    }
+    const found = (program: ts.Program): Diagnostic[] =>
+      [...targets].flatMap((file) => {
+        const sf = program.getSourceFile(file);
+        if (!sf) return [];
+        return [...program.getSyntacticDiagnostics(sf), ...program.getSemanticDiagnostics(sf)].flatMap((d) => this.toDiagnostic(d, sf));
+      });
+    const key = (d: Diagnostic) => `${d.file}\n${d.code}\n${d.message}`;
+    const baseline = new Map<string, number>();
+    for (const d of found(before)) baseline.set(key(d), (baseline.get(key(d)) ?? 0) + 1);
+    // Only diagnostics the change added count. Positions shift, so they are matched by file, code, and message.
+    return found(after).filter((d) => {
+      const n = baseline.get(key(d)) ?? 0;
+      if (n > 0) baseline.set(key(d), n - 1);
+      return n === 0;
+    });
+  }
+
+  declarationText(ref: SymbolRef): string | null {
+    const sf = this.program.getSourceFile(this.abs(ref.file));
+    if (!sf) return null;
+    let found: ts.Node | undefined;
+    const visit = (n: ts.Node): void => {
+      if (found) return;
+      if ((ts.isClassDeclaration(n) || ts.isInterfaceDeclaration(n) || ts.isTypeAliasDeclaration(n) || ts.isEnumDeclaration(n)) && n.name && qualifiedName(n) === ref.symbol) found = n;
+      else if (ts.isModuleDeclaration(n) || ts.isModuleBlock(n) || ts.isSourceFile(n)) ts.forEachChild(n, visit);
+    };
+    visit(sf);
+    return found ? found.getText(sf) : null;
+  }
+
+  private toDiagnostic(d: ts.Diagnostic, sf: ts.SourceFile): Diagnostic[] {
+    if (d.category !== ts.DiagnosticCategory.Error && d.category !== ts.DiagnosticCategory.Warning) return [];
+    const start = d.start ?? 0;
+    return [
+      {
+        file: this.rel(sf.fileName),
+        range: rangeBetween(start, start + (d.length ?? 0), sf),
+        message: ts.flattenDiagnosticMessageText(d.messageText, "\n"),
+        code: `TS${d.code}`,
+        severity: d.category === ts.DiagnosticCategory.Error ? "error" : "warning",
+      },
+    ];
+  }
+
+  /** A program with some files' text replaced, sharing everything else with the current one. */
+  private withOverlays(overlays: Map<string, string>): ts.Program {
+    const abs = new Map([...overlays].map(([p, t]) => [this.abs(p), t]));
+    const key = JSON.stringify([...abs].sort(([a], [b]) => a.localeCompare(b)));
+    if (this.overlaid?.key === key && this.overlaid.base === this.program) return this.overlaid.program;
+    const rootNames = [...this.program.getRootFileNames()];
+    // The disk version first, so the baseline is what is on disk now.
+    const base = rebuild(this.program, rootNames, new Map(), this.seen);
+    this.setProgram(base);
+    const program = rebuild(base, rootNames, abs, this.seen);
+    this.overlaid = { key, base, program };
+    return program;
+  }
+
+  private setProgram(program: ts.Program): void {
+    if (program === this.program) return;
+    this.program = program;
+    this.checker = program.getTypeChecker();
+    this.implementationIndex = undefined;
+    this.unitNameIndex = undefined;
+  }
+
+  private abs(path: string): string {
+    return normal(isAbsolute(path) ? path : join(this.root, path));
   }
 
   extractFile(path: string): FileExtraction {
@@ -119,6 +236,7 @@ export class TsProject implements AdapterProject, CallResolver {
   dispose(): void {
     this.implementationIndex = undefined;
     this.unitNameIndex = undefined;
+    this.overlaid = undefined;
   }
 
   // ---------------------------------------------------------------- units
@@ -376,6 +494,48 @@ export class TsProject implements AdapterProject, CallResolver {
     return toProjectPath(this.root, resolve(fileName));
   }
 }
+
+function normal(path: string): string {
+  return path.replace(/\\/g, "/");
+}
+
+/**
+ * A new program over the same options, reading `overlays` (absolute path → text) instead of the
+ * disk. Source files whose text is unchanged are taken from `old`, so only what changed is parsed
+ * again, as in TypeScript's own watch mode.
+ */
+function rebuild(old: ts.Program, rootNames: string[], overlays: Map<string, string>, seen: SeenFiles): ts.Program {
+  const options = old.getCompilerOptions();
+  const host = ts.createCompilerHost(options, true);
+  const readFile = host.readFile.bind(host);
+  const fileExists = host.fileExists.bind(host);
+  host.readFile = (f) => overlays.get(normal(f)) ?? readFile(f);
+  host.fileExists = (f) => overlays.has(normal(f)) || fileExists(f);
+  host.getSourceFile = (fileName, languageVersion) => {
+    const path = normal(fileName);
+    const overlay = overlays.get(path);
+    const previous = old.getSourceFile(fileName);
+    if (overlay !== undefined) return previous?.text === overlay ? previous : ts.createSourceFile(fileName, overlay, languageVersion, true);
+    // A file whose size and modification time are as last seen is not read again.
+    let info: { size: number; mtimeMs: number } | undefined;
+    try {
+      info = statSync(fileName);
+    } catch {
+      return undefined;
+    }
+    const known = seen.get(path);
+    if (known && previous && known.sf === previous && known.size === info.size && known.mtimeMs === info.mtimeMs) return previous;
+    const text = readFile(fileName);
+    if (text === undefined) return undefined;
+    const sf = previous && previous.text === text ? previous : ts.createSourceFile(fileName, text, languageVersion, true);
+    seen.set(path, { size: info.size, mtimeMs: info.mtimeMs, sf });
+    return sf;
+  };
+  return ts.createProgram({ rootNames, options, host, oldProgram: old });
+}
+
+/** Source files read from disk, by path, with the size and modification time they were read at. */
+type SeenFiles = Map<string, { size: number; mtimeMs: number; sf: ts.SourceFile }>;
 
 function calleeName(callee: ts.Expression): ts.Node {
   const e = unwrap(callee);

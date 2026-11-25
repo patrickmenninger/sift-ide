@@ -180,12 +180,7 @@ async function runOnce(
   judgeRoute: ReturnType<Router["route"]>,
   say: (line: string) => void,
 ): Promise<RunResult> {
-  const dir = join(await mkdtemp(join(tmpdir(), "sift-eval-")), o.fixture);
-  // Copy the fixture with its project rule packs (.sift/rules), but no descriptions, cache, or node_modules.
-  const skip = (src: string) => /[\\/](node_modules|\.cache)$/.test(src) || (/\.sift$/.test(src) && !/[\\/]\.sift$/.test(src));
-  await cp(fixtureDir, dir, { recursive: true, filter: (src) => !skip(src) });
-  const link = join(dir, "node_modules");
-  if (o.nodeModules) await symlink(o.nodeModules, link, "junction");
+  const { dir, cleanup } = await copyFixture(fixtureDir, o.fixture, o.nodeModules);
   try {
     const project = await loadProject(dir);
     const settings = { ...project.config, models: { tasks: { ...config.tasks }, tiers: {} } };
@@ -282,9 +277,27 @@ async function runOnce(
     );
     return result;
   } finally {
-    if (o.nodeModules && existsSync(link)) await unlink(link); // remove the link itself, never what it points to
-    await rm(join(dir, ".."), { recursive: true, force: true });
+    await cleanup();
   }
+}
+
+/**
+ * A fresh copy of a fixture in a temporary folder, with its project rule packs (.sift/rules) but no
+ * descriptions, cache, or node_modules; `nodeModules` is linked in. `cleanup` removes the copy.
+ */
+export async function copyFixture(fixtureDir: string, fixture: string, nodeModules?: string): Promise<{ dir: string; cleanup: () => Promise<void> }> {
+  const dir = join(await mkdtemp(join(tmpdir(), "sift-eval-")), fixture);
+  const skip = (src: string) => /[\\/](node_modules|\.cache)$/.test(src) || (/\.sift$/.test(src) && !/[\\/]\.sift$/.test(src));
+  await cp(fixtureDir, dir, { recursive: true, filter: (src) => !skip(src) });
+  const link = join(dir, "node_modules");
+  if (nodeModules) await symlink(nodeModules, link, "junction");
+  return {
+    dir,
+    cleanup: async () => {
+      if (nodeModules && existsSync(link)) await unlink(link); // remove the link itself, never what it points to
+      await rm(join(dir, ".."), { recursive: true, force: true });
+    },
+  };
 }
 
 interface DescribedState {
@@ -421,10 +434,10 @@ export function summarize(config: string, runs: RunResult[]): ConfigSummary {
   };
 }
 
-/** Write `results/<timestamp>.json` and `.md` (design §13.3); returns the two paths. */
-export async function writeResults(dir: string, result: EvalResult, markdown: string): Promise<{ json: string; markdown: string }> {
+/** Write `results/<timestamp><suffix>.json` and `.md` (design §13.3); returns the two paths. */
+export async function writeResults(dir: string, result: { startedAt: string }, markdown: string, suffix = ""): Promise<{ json: string; markdown: string }> {
   await mkdir(dir, { recursive: true });
-  const stamp = result.startedAt.replace(/:/g, "-").replace(/\.\d+Z$/, "Z");
+  const stamp = result.startedAt.replace(/:/g, "-").replace(/\.\d+Z$/, "Z") + suffix;
   const json = join(dir, `${stamp}.json`);
   const md = join(dir, `${stamp}.md`);
   await writeFile(json, `${JSON.stringify(result, null, 1)}\n`);
@@ -432,7 +445,7 @@ export async function writeResults(dir: string, result: EvalResult, markdown: st
   return { json, markdown: md };
 }
 
-async function gitInfo(cwd: string): Promise<{ sha: string; dirty: boolean } | null> {
+export async function gitInfo(cwd: string): Promise<{ sha: string; dirty: boolean } | null> {
   const run = promisify(execFile);
   try {
     const sha = (await run("git", ["rev-parse", "--short", "HEAD"], { cwd })).stdout.trim();
@@ -443,11 +456,11 @@ async function gitInfo(cwd: string): Promise<{ sha: string; dirty: boolean } | n
   }
 }
 
-function pct(n: number): string {
+export function pct(n: number): string {
   return `${Math.round(n * 100)}%`;
 }
 
-function semaphore(max: number): <T>(fn: () => Promise<T>) => Promise<T> {
+export function semaphore(max: number): <T>(fn: () => Promise<T>) => Promise<T> {
   let active = 0;
   const waiting: (() => void)[] = [];
   return async (fn) => {

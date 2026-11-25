@@ -1,6 +1,6 @@
 import { Document, isScalar, isSeq, parseDocument, Scalar, visit, type ToStringOptions } from "yaml";
 import { SiftError } from "./errors.js";
-import type { SiftFile, SiftStep, SiftUnit } from "./schema.js";
+import { requiredSchemaVersion, type SiftFile, type SiftStep, type SiftUnit } from "./schema.js";
 import { validateSiftFile } from "./validate.js";
 
 /** Prose fields: written as folded block scalars when long (design §6.3). */
@@ -115,7 +115,8 @@ function sameUnit(a: SiftUnit, b: SiftUnit | undefined): boolean {
 // ---------------------------------------------------------------- plain objects in fixed key order
 
 function filePlain(file: SiftFile): Plain {
-  return { sift: file.sift, source: file.source, language: file.language, fileHash: file.fileHash, units: file.units.map(unitPlain) };
+  // A file is upgraded only when it holds something its declared version cannot (phase-2-design §7).
+  return { sift: Math.max(file.sift, requiredSchemaVersion(file)), source: file.source, language: file.language, fileHash: file.fileHash, units: file.units.map(unitPlain) };
 }
 
 function unitPlain(u: SiftUnit): Plain {
@@ -125,6 +126,7 @@ function unitPlain(u: SiftUnit): Plain {
     kind: u.kind,
     lite: u.lite ? true : undefined,
     status: u.status,
+    userEdited: u.userEdited,
     bodyHash: u.bodyHash,
     contextHash: u.contextHash,
     generatedBy: u.generatedBy && {
@@ -138,13 +140,15 @@ function unitPlain(u: SiftUnit): Plain {
     returns: u.returns && compact({ type: u.returns.type, typeInferred: u.returns.typeInferred ? true : undefined, meaning: u.returns.meaning }),
     effects: u.effects,
     steps: u.steps.map(stepPlain),
-    warnings: u.warnings.map((w) => compact({ id: w.id, kind: w.kind, text: w.text, steps: w.steps })),
+    warnings: u.warnings.map((w) =>
+      compact({ id: w.id, kind: w.kind, text: w.text, steps: w.steps, resolved: w.resolved && { by: w.resolved.by, note: w.resolved.note } }),
+    ),
     tests: u.tests,
   });
 }
 
 function stepPlain(s: SiftStep): Plain {
-  return compact({ id: s.id, kind: s.kind, text: s.text, covers: s.covers, calls: s.calls, effects: s.effects, steps: s.steps.map(stepPlain) });
+  return compact({ id: s.id, kind: s.kind, status: s.status, text: s.text, covers: s.covers, calls: s.calls, effects: s.effects, steps: s.steps.map(stepPlain) });
 }
 
 /** Drop undefined values and empty lists, keeping key order. */

@@ -1,0 +1,459 @@
+{
+  "name": "sift-vscode",
+  "displayName": "Sift",
+  "description": "Readable, verified descriptions of what your code does, next to the code.",
+  "version": "0.2.0",
+  "private": true,
+  "publisher": "sift",
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./dist/extension.cjs",
+  "activationEvents": [
+    "workspaceContains:sift.config.yaml"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "watch": "node scripts/build.mjs --watch",
+    "package": "node scripts/build.mjs --minify && vsce package --no-dependencies --allow-missing-repository --skip-license --out sift.vsix",
+    "test:integration": "node scripts/build.mjs && node scripts/run-integration.mjs"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "sift.initialize",
+        "title": "Initialize",
+        "category": "Sift"
+      },
+      {
+        "command": "sift.describeFile",
+        "title": "Describe This File",
+        "category": "Sift",
+        "icon": "$(sparkle)",
+        "enablement": "sift.active"
+      },
+      {
+        "command": "sift.describeFolder",
+        "title": "Describe Folder",
+        "category": "Sift",
+        "enablement": "sift.active"
+      },
+      {
+        "command": "sift.updateAll",
+        "title": "Update Out-of-Date Descriptions",
+        "category": "Sift",
+        "icon": "$(sparkle)",
+        "enablement": "sift.active"
+      },
+      {
+        "command": "sift.generateEntry",
+        "title": "Update Descriptions",
+        "category": "Sift",
+        "icon": "$(sparkle)"
+      },
+      {
+        "command": "sift.openLogic",
+        "title": "Open Logic",
+        "category": "Sift",
+        "icon": "$(book)",
+        "enablement": "sift.active"
+      },
+      {
+        "command": "sift.openSourceOfLogic",
+        "title": "Open Source",
+        "category": "Sift",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "sift.editUnit",
+        "title": "Edit Logic of This…",
+        "category": "Sift",
+        "icon": "$(edit)",
+        "enablement": "sift.active"
+      },
+      {
+        "command": "sift.undoEdit",
+        "title": "Undo Edit…",
+        "category": "Sift",
+        "icon": "$(discard)",
+        "enablement": "sift.active"
+      },
+      {
+        "command": "sift.showCallers",
+        "title": "Show Callers",
+        "category": "Sift",
+        "icon": "$(call-incoming)",
+        "enablement": "sift.active"
+      },
+      {
+        "command": "sift.showCallees",
+        "title": "Show Callees",
+        "category": "Sift",
+        "icon": "$(call-outgoing)",
+        "enablement": "sift.active"
+      },
+      {
+        "command": "sift.showCallersOfNode",
+        "title": "Show Callers",
+        "category": "Sift",
+        "icon": "$(call-incoming)"
+      },
+      {
+        "command": "sift.showCalleesOfNode",
+        "title": "Show Callees",
+        "category": "Sift",
+        "icon": "$(call-outgoing)"
+      },
+      {
+        "command": "sift.showNeighbourhood",
+        "title": "Show Neighbourhood Diagram",
+        "category": "Sift",
+        "icon": "$(type-hierarchy)",
+        "enablement": "sift.active"
+      },
+      {
+        "command": "sift.showNeighbourhoodOfNode",
+        "title": "Show Neighbourhood Diagram",
+        "category": "Sift",
+        "icon": "$(type-hierarchy)"
+      },
+      {
+        "command": "sift.showFlow",
+        "title": "Show Route Flow…",
+        "category": "Sift",
+        "icon": "$(git-pull-request-go-to-changes)",
+        "enablement": "sift.active"
+      },
+      {
+        "command": "sift.showImpact",
+        "title": "Show Impact of Changing This",
+        "category": "Sift",
+        "icon": "$(pulse)",
+        "enablement": "sift.active"
+      },
+      {
+        "command": "sift.showImpactOfChanges",
+        "title": "Show Impact of Uncommitted Changes",
+        "category": "Sift",
+        "icon": "$(pulse)",
+        "enablement": "sift.active"
+      },
+      {
+        "command": "sift.openCallSite",
+        "title": "Go to Call Site",
+        "category": "Sift",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "sift.refreshStatus",
+        "title": "Refresh",
+        "category": "Sift",
+        "icon": "$(refresh)",
+        "enablement": "sift.active"
+      },
+      {
+        "command": "sift.restartServer",
+        "title": "Restart Server",
+        "category": "Sift"
+      },
+      {
+        "command": "sift.showOutput",
+        "title": "Show Output",
+        "category": "Sift"
+      },
+      {
+        "command": "sift.focusStatus",
+        "title": "Show Out-of-Date Descriptions",
+        "category": "Sift"
+      },
+      {
+        "command": "sift.openUnit",
+        "title": "Open Unit",
+        "category": "Sift"
+      },
+      {
+        "command": "sift.openRange",
+        "title": "Open Range",
+        "category": "Sift"
+      }
+    ],
+    "customEditors": [
+      {
+        "viewType": "sift.logic",
+        "displayName": "Sift Logic",
+        "selector": [
+          {
+            "filenamePattern": "*.sift"
+          }
+        ],
+        "priority": "default"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "sift.openLogic",
+        "key": "ctrl+alt+l",
+        "mac": "cmd+alt+l",
+        "when": "sift.active && editorTextFocus"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "sift",
+          "title": "Sift",
+          "icon": "media/sift.svg"
+        }
+      ]
+    },
+    "views": {
+      "sift": [
+        {
+          "id": "sift.outOfDate",
+          "name": "Out of Date",
+          "contextualTitle": "Sift"
+        },
+        {
+          "id": "sift.callers",
+          "name": "Callers",
+          "contextualTitle": "Sift",
+          "when": "sift.hasCallers"
+        },
+        {
+          "id": "sift.callees",
+          "name": "Callees",
+          "contextualTitle": "Sift",
+          "when": "sift.hasCallees"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "sift.outOfDate",
+        "contents": "This workspace has no Sift project.\n[Initialize Sift](command:sift.initialize)",
+        "when": "!sift.active"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "sift.generateEntry",
+          "when": "false"
+        },
+        {
+          "command": "sift.showCallersOfNode",
+          "when": "false"
+        },
+        {
+          "command": "sift.showCalleesOfNode",
+          "when": "false"
+        },
+        {
+          "command": "sift.openCallSite",
+          "when": "false"
+        },
+        {
+          "command": "sift.openUnit",
+          "when": "false"
+        },
+        {
+          "command": "sift.openRange",
+          "when": "false"
+        },
+        {
+          "command": "sift.describeFolder",
+          "when": "false"
+        },
+        {
+          "command": "sift.openSourceOfLogic",
+          "when": "activeCustomEditorId == sift.logic || activeWebviewPanelId == sift.logic"
+        },
+        {
+          "command": "sift.showNeighbourhoodOfNode",
+          "when": "false"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "sift.updateAll",
+          "when": "view == sift.outOfDate && sift.active",
+          "group": "navigation@1"
+        },
+        {
+          "command": "sift.refreshStatus",
+          "when": "view == sift.outOfDate && sift.active",
+          "group": "navigation@2"
+        },
+        {
+          "command": "sift.showImpactOfChanges",
+          "when": "view == sift.outOfDate && sift.active",
+          "group": "secondary@1"
+        },
+        {
+          "command": "sift.showFlow",
+          "when": "view == sift.outOfDate && sift.active",
+          "group": "secondary@2"
+        },
+        {
+          "command": "sift.undoEdit",
+          "when": "view == sift.outOfDate && sift.active",
+          "group": "secondary@3"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "sift.generateEntry",
+          "when": "view == sift.outOfDate && viewItem =~ /generatable/",
+          "group": "inline"
+        },
+        {
+          "command": "sift.showCallersOfNode",
+          "when": "view =~ /sift.call(ers|ees)/ && viewItem =~ /sift.call(Unit|Subject)/",
+          "group": "navigation@1"
+        },
+        {
+          "command": "sift.showCalleesOfNode",
+          "when": "view =~ /sift.call(ers|ees)/ && viewItem =~ /sift.call(Unit|Subject)/",
+          "group": "navigation@2"
+        },
+        {
+          "command": "sift.openCallSite",
+          "when": "view =~ /sift.call(ers|ees)/ && viewItem =~ /sift.call(Unit|Node)/",
+          "group": "inline"
+        },
+        {
+          "command": "sift.showNeighbourhoodOfNode",
+          "when": "view =~ /sift.call(ers|ees)/ && viewItem =~ /sift.call(Unit|Subject)/",
+          "group": "navigation@3"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "sift.openLogic",
+          "when": "sift.active && resourceScheme == file && resourceExtname =~ /.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/",
+          "group": "navigation@89"
+        },
+        {
+          "command": "sift.describeFile",
+          "when": "sift.active && resourceScheme == file && resourceExtname =~ /\\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/",
+          "group": "navigation@90"
+        },
+        {
+          "command": "sift.openSourceOfLogic",
+          "when": "activeCustomEditorId == sift.logic || activeWebviewPanelId == sift.logic",
+          "group": "navigation@1"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "sift.openLogic",
+          "when": "sift.active && resourceExtname =~ /.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/",
+          "group": "0_sift@0"
+        },
+        {
+          "command": "sift.editUnit",
+          "when": "sift.active && resourceExtname =~ /\\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/",
+          "group": "0_sift@0"
+        },
+        {
+          "command": "sift.showCallers",
+          "when": "sift.active && resourceExtname =~ /\\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/",
+          "group": "0_sift@1"
+        },
+        {
+          "command": "sift.showCallees",
+          "when": "sift.active && resourceExtname =~ /\\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/",
+          "group": "0_sift@2"
+        },
+        {
+          "command": "sift.showNeighbourhood",
+          "when": "sift.active && resourceExtname =~ /.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/",
+          "group": "0_sift@3"
+        },
+        {
+          "command": "sift.showImpact",
+          "when": "sift.active && resourceExtname =~ /.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/",
+          "group": "0_sift@4"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "sift.openLogic",
+          "when": "sift.active && !explorerResourceIsFolder && resourceExtname =~ /.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/",
+          "group": "7_sift@0"
+        },
+        {
+          "command": "sift.describeFile",
+          "when": "sift.active && !explorerResourceIsFolder && resourceExtname =~ /\\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/",
+          "group": "7_sift@1"
+        },
+        {
+          "command": "sift.describeFolder",
+          "when": "sift.active && explorerResourceIsFolder",
+          "group": "7_sift@1"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Sift",
+      "properties": {
+        "sift.updateOnSave": {
+          "type": "string",
+          "enum": [
+            "off",
+            "ask"
+          ],
+          "default": "off",
+          "enumDescriptions": [
+            "Never offer to update descriptions after saving.",
+            "After saving a file whose logic is now out of date, offer to update it (you confirm the estimate first)."
+          ],
+          "markdownDescription": "Whether to offer to update a file's descriptions after you save it. Sift never calls the AI without asking.",
+          "scope": "resource"
+        }
+      }
+    },
+    "colors": [
+      {
+        "id": "sift.staleLogicForeground",
+        "description": "Explorer dot on files whose Sift logic is out of date.",
+        "defaults": {
+          "dark": "editorWarning.foreground",
+          "light": "editorWarning.foreground",
+          "highContrast": "editorWarning.foreground",
+          "highContrastLight": "editorWarning.foreground"
+        }
+      },
+      {
+        "id": "sift.missingLogicForeground",
+        "description": "Explorer dot on files with units Sift has not described yet.",
+        "defaults": {
+          "dark": "editorInfo.foreground",
+          "light": "editorInfo.foreground",
+          "highContrast": "editorInfo.foreground",
+          "highContrastLight": "editorInfo.foreground"
+        }
+      }
+    ]
+  },
+  "devDependencies": {
+    "@sift/adapter-typescript": "0.2.0",
+    "@sift/core": "0.2.0",
+    "@sift/provider-claude-code": "0.2.0",
+    "@sift/rules": "0.2.0",
+    "@sift/server": "0.2.0",
+    "@types/vscode": "1.100.0",
+    "@vscode/test-electron": "3.1.0",
+    "@vscode/vsce": "4.1.1",
+    "elkjs": "0.12.1",
+    "esbuild": "0.28.2",
+    "jsdom": "31.0.0",
+    "preact": "11.2.0",
+    "vscode-jsonrpc": "9.0.3"
+  }
+}

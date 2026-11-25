@@ -17,6 +17,12 @@
       ],
       "@sift/eval": [
         "./eval/harness/src/index.ts"
+      ],
+      "@sift/server": [
+        "./packages/server/src/index.ts"
+      ],
+      "@sift/mcp": [
+        "./packages/mcp-server/src/index.ts"
       ]
     }
   },

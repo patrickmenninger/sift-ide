@@ -4,6 +4,7 @@ import {
   EFFECTS,
   SIFT_SCHEMA_VERSION,
   STEP_KINDS,
+  STEP_STATUSES,
   UNIT_KINDS,
   UNIT_STATUSES,
   type Effect,
@@ -14,11 +15,13 @@ import {
   type SiftStep,
   type SiftUnit,
   type SiftWarning,
+  requiredSchemaVersion,
 } from "./schema.js";
 
 const HASH = /^[0-9a-f]{16}$/;
 const WARNING_KIND = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
 const CALL_REF = /^(u_[a-z2-7]{8}|ext:[^#\s]+#\S+)$/;
+const USER_EDITED_FIELD = /^(summary|returns|inputs\..+)$/;
 
 type Obj = Record<string, unknown>;
 
@@ -134,7 +137,7 @@ export function validateSiftFile(raw: unknown, name: string): SiftFile {
   }
 
   const file: SiftFile = {
-    sift: SIFT_SCHEMA_VERSION,
+    sift: typeof version === "number" && Number.isInteger(version) && version >= 0 ? version : SIFT_SCHEMA_VERSION,
     source: c.string(root, "source", "file", { nonEmpty: true }) ?? "",
     language: c.string(root, "language", "file", { nonEmpty: true }) ?? "",
     fileHash: c.string(root, "fileHash", "file", { pattern: HASH }) ?? "",
@@ -153,6 +156,9 @@ export function validateSiftFile(raw: unknown, name: string): SiftFile {
     file.units.push(unit);
   });
 
+  const needs = requiredSchemaVersion(file);
+  if (needs > file.sift) c.fail("sift", `the file uses schema ${needs} fields (step status, userEdited, or resolved warnings) but declares schema ${file.sift}`);
+
   if (c.problems.length > 0) {
     throw new SiftError("SIFT_INVALID", `${name} has ${c.problems.length} problem(s).`, c.problems);
   }
@@ -161,7 +167,7 @@ export function validateSiftFile(raw: unknown, name: string): SiftFile {
 
 function validateUnit(c: Checker, raw: unknown, at: string): SiftUnit | null {
   const o = c.object(raw, at, [
-    "id", "symbol", "kind", "lite", "status", "bodyHash", "contextHash", "generatedBy",
+    "id", "symbol", "kind", "lite", "status", "userEdited", "bodyHash", "contextHash", "generatedBy",
     "summary", "inputs", "returns", "effects", "steps", "warnings", "tests",
   ]);
   if (!o) return null;
@@ -199,6 +205,17 @@ function validateUnit(c: Checker, raw: unknown, at: string): SiftUnit | null {
     const returns = validateTyped(c, o.returns, `${at}.returns`, false);
     if (returns) unit.returns = returns as SiftReturns;
   }
+  if (o.userEdited !== undefined) {
+    const fields = c.strings(o, "userEdited", at, USER_EDITED_FIELD);
+    fields.forEach((f, i) => {
+      if (f === "returns" && !unit.returns) c.fail(`${at}.userEdited[${i}]`, "names returns, but the unit has no returns");
+      if (f.startsWith("inputs.") && !unit.inputs.some((input) => input.name === f.slice("inputs.".length))) {
+        c.fail(`${at}.userEdited[${i}]`, `names an input the unit does not have: ${f.slice("inputs.".length)}`);
+      }
+    });
+    if (new Set(fields).size !== fields.length) c.fail(`${at}.userEdited`, "lists a field more than once");
+    if (fields.length > 0) unit.userEdited = fields;
+  }
 
   const stepIds = new Set<string>();
   unit.steps = c.list(o, "steps", at).flatMap((s, i) => validateStep(c, s, `${at}.steps[${i}]`, stepIds) ?? []);
@@ -207,7 +224,7 @@ function validateUnit(c: Checker, raw: unknown, at: string): SiftUnit | null {
   const warningIds = new Set<string>();
   unit.warnings = c.list(o, "warnings", at).flatMap((w, i) => {
     const wat = `${at}.warnings[${i}]`;
-    const wo = c.object(w, wat, ["id", "kind", "text", "steps"]);
+    const wo = c.object(w, wat, ["id", "kind", "text", "steps", "resolved"]);
     if (!wo) return [];
     const warning: SiftWarning = {
       id: c.string(wo, "id", wat, { pattern: ID_PATTERNS.warning }) ?? "",
@@ -215,6 +232,14 @@ function validateUnit(c: Checker, raw: unknown, at: string): SiftUnit | null {
       text: c.string(wo, "text", wat, { nonEmpty: true }) ?? "",
       steps: c.strings(wo, "steps", wat, ID_PATTERNS.step),
     };
+    if (wo.resolved !== undefined) {
+      const ro = c.object(wo.resolved, `${wat}.resolved`, ["by", "note"]);
+      if (ro) {
+        const by = c.oneOf(ro, "by", `${wat}.resolved`, ["edit"] as const);
+        const note = c.string(ro, "note", `${wat}.resolved`, { nonEmpty: true });
+        if (by && note !== undefined) warning.resolved = { by, note };
+      }
+    }
     if (warningIds.has(warning.id)) c.fail(`${wat}.id`, `duplicate warning id ${warning.id}`);
     warningIds.add(warning.id);
     for (const ref of warning.steps) {
@@ -238,7 +263,7 @@ function validateTyped(c: Checker, raw: unknown, at: string, named: boolean): Si
 }
 
 function validateStep(c: Checker, raw: unknown, at: string, ids: Set<string>): SiftStep | null {
-  const o = c.object(raw, at, ["id", "kind", "text", "covers", "calls", "effects", "steps"]);
+  const o = c.object(raw, at, ["id", "kind", "status", "text", "covers", "calls", "effects", "steps"]);
   if (!o) return null;
   const step: SiftStep = {
     id: c.string(o, "id", at, { pattern: ID_PATTERNS.step }) ?? "",
@@ -250,6 +275,8 @@ function validateStep(c: Checker, raw: unknown, at: string, ids: Set<string>): S
   };
   const kind = c.oneOf(o, "kind", at, STEP_KINDS, true);
   if (kind !== undefined) step.kind = kind;
+  const status = c.oneOf(o, "status", at, STEP_STATUSES, true);
+  if (status !== undefined) step.status = status;
   if (ids.has(step.id)) c.fail(`${at}.id`, `duplicate step id ${step.id}`);
   ids.add(step.id);
   step.steps = c.list(o, "steps", at).flatMap((s, i) => validateStep(c, s, `${at}.steps[${i}]`, ids) ?? []);

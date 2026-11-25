@@ -1,4 +1,5 @@
 import type { ExtractedUnit, StructureNode } from "./adapter.js";
+import { personWordingNote } from "./provenance.js";
 import { redactSecrets } from "./redact.js";
 import type { Effect, SiftStep, SiftUnit } from "./schema.js";
 
@@ -78,7 +79,8 @@ export function renderDescribeInput(input: DescribeInput): RenderedInput {
   if (input.previous) {
     const { unit: prev, diff } = input.previous;
     lines.push("", "Previous description (its `covers` keys refer to the previous version of the code):", "```json", previousJson(prev, input.lite), "```");
-    if (prev.status === "user-edited") lines.push("", "A person edited this description. Keep their wording wherever it is still accurate.");
+    const note = personWordingNote(prev);
+    if (note) lines.push("", note);
     if (diff !== null) {
       const changes = redactSecrets(diff);
       redactions += changes.count;
@@ -101,7 +103,8 @@ function previousJson(unit: SiftUnit, lite: boolean): string {
     inputs: unit.inputs.map((i) => ({ name: i.name, meaning: i.meaning })),
     returns: unit.returns ? { meaning: unit.returns.meaning } : null,
     ...(lite ? {} : { steps: unit.steps.map(step) }),
-    warnings: unit.warnings.map((w) => ({ kind: w.kind, text: w.text, ...(lite ? {} : { covers: w.steps.flatMap((id) => covers.get(id) ?? []) }) })),
+    // A warning an edit resolved is not shown: the update drops it unless the code still has the problem.
+    warnings: unit.warnings.filter((w) => !w.resolved).map((w) => ({ kind: w.kind, text: w.text, ...(lite ? {} : { covers: w.steps.flatMap((id) => covers.get(id) ?? []) }) })),
   };
   return JSON.stringify(data, null, 1);
 }
@@ -119,6 +122,8 @@ export function renderContextCheckInput(input: ContextCheckInput): string {
   const description = { summary: input.unit.summary, ...(input.unit.lite ? {} : { steps: input.unit.steps.map(step) }) };
   const lines = [`File: ${input.file}`, `Unit: ${input.unit.symbol} (${input.unit.kind})`, "", "Current description:", "```json", JSON.stringify(description, null, 1), "```", "", "Changed callees:"];
   for (const c of input.changes) lines.push(`- \`${c.name}\``, `  before: ${c.before ?? "(not known)"}`, `  now: ${c.after}`);
+  const note = personWordingNote(input.unit);
+  if (note) lines.push("", note);
   return lines.join("\n");
 }
 
