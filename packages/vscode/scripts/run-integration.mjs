@@ -27,13 +27,51 @@ if (described.code !== 0) {
   process.exit(1);
 }
 
+// A change ready for review (phase-2-design §8, M15), proposed with a stand-in model, so the tests
+// can review, apply, and undo it without an AI.
+const WITHDRAW = "src/accounts/account-service.ts#AccountService.withdraw";
+const withdraw = `async withdraw(userId: string, accountId: string, amountCents: number): Promise<Account> {
+  if (amountCents <= 0) {
+    throw new ValidationError("Withdrawal amount must be positive");
+  }
+  const account = await this.repo.getAccount(accountId);
+  if (account.ownerId !== userId) {
+    throw new ForbiddenError("You can only withdraw from your own accounts");
+  }
+  account.balanceCents -= amountCents;
+  await this.repo.save(account);
+  return account;
+}`;
+const editor = new FakeProvider((req) => {
+  if (req.task === "edit-plan") {
+    return {
+      kind: "behavior",
+      interpretation: "Reject a withdrawal of zero or less with a validation error before reading the account.",
+      questions: [],
+      warnings: [],
+      allowedUnits: [{ unit: WITHDRAW, reason: "the edited unit" }],
+      helpers: [],
+      examples: [],
+      broader: null,
+    };
+  }
+  if (req.task === "edit-code") return { units: [{ unit: WITHDRAW, text: withdraw }], insertions: [], notes: "" };
+  if (req.task === "edit-verify") return { satisfied: true, gaps: [], unrequested: [] };
+  return answer(req);
+});
+const proposed = await sift(editor, "-C", workspace, "edit", "AccountService.withdraw", "--request", "Reject amounts of zero or less");
+if (proposed.code !== 0) {
+  console.error(`Proposing the fixture's change failed:\n${proposed.out}\n${proposed.err}`);
+  process.exit(1);
+}
+
 try {
   await runTests({
     version: process.env.SIFT_VSCODE_VERSION ?? "stable",
     extensionDevelopmentPath: pkg,
     extensionTestsPath: join(pkg, "test", "integration.cjs"),
     launchArgs: [workspace, "--disable-extensions", "--skip-welcome", "--skip-release-notes", "--disable-workspace-trust"],
-    extensionTestsEnv: { SIFT_TEST_WORKSPACE: workspace },
+    extensionTestsEnv: { SIFT_TEST_WORKSPACE: workspace, ...(process.env.SIFT_TEST_GREP ? { SIFT_TEST_GREP: process.env.SIFT_TEST_GREP } : {}) },
   });
 } catch (err) {
   console.error(err instanceof Error ? err.message : err);

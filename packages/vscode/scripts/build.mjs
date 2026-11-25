@@ -5,6 +5,7 @@
 //                        `typescript`, run as a child process with VS Code's own Node
 //   dist/webview.js/css  the logic document (Preact), loaded by the extension's webviews
 //   dist/graph.js/css    the graph views (Preact, elkjs layout)
+//   dist/review.js/css   the review panel for a proposed edit (Preact)
 //   dist/lib.*.d.ts      TypeScript's default libraries, found next to the bundle
 //   prompts/ models/     read by the engine next to the bundle (`../prompts`, `../models`)
 //   rules/               the built-in rule packs
@@ -77,7 +78,7 @@ const server = {
 
 const webview = {
   ...common,
-  entryPoints: { webview: join(pkg, "src", "webview", "main.tsx"), graph: join(pkg, "src", "webview", "graph-main.tsx") },
+  entryPoints: { webview: join(pkg, "src", "webview", "main.tsx"), graph: join(pkg, "src", "webview", "graph-main.tsx"), review: join(pkg, "src", "webview", "review-main.tsx") },
   outdir: join(pkg, "dist"),
   platform: "browser",
   target: "es2022",

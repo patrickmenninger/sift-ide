@@ -3,11 +3,13 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import * as vscode from "vscode";
 import type { GenerateEvent, SourceRange } from "@sift/core";
+import { EditController, type EditUiHost } from "./edits.js";
 import { planSummary, resultSummary } from "./generate-summary.js";
 import { GraphPanels, type GraphHost, type GraphPanel } from "./graph-panels.js";
 import { LogicDocuments, type LogicHost, type LogicView } from "./logic-editor.js";
 import { sourceOfLogic } from "./logic-model.js";
 import { Project } from "./project.js";
+import type { ReviewPanel } from "./review-panel.js";
 import type { ServerChild } from "./server-process.js";
 import { CallTreeProvider, OutOfDateDecorations, SiftStatusBar, StatusTreeProvider, type ProjectRegistry } from "./views.js";
 
@@ -16,9 +18,10 @@ const CONFIG_FILE = "sift.config.yaml";
 /**
  * The extension shell (phase-2-design §6, M11): one `sift serve` per workspace folder that holds
  * sift.config.yaml, a status bar item and explorer decorations for out-of-date logic, the
- * out-of-date, callers, and callees views, and generating with an estimate first.
+ * out-of-date, callers, and callees views, and generating with an estimate first. Logic documents
+ * (M12), graph views (M13), and editing through change requests (M15).
  */
-class Sift implements ProjectRegistry, LogicHost, GraphHost, vscode.Disposable {
+class Sift implements ProjectRegistry, LogicHost, GraphHost, EditUiHost, vscode.Disposable {
   private readonly byFolder = new Map<string, Project>();
   private readonly changeEmitter = new vscode.EventEmitter<void>();
   readonly onDidChange = this.changeEmitter.event;
@@ -28,6 +31,7 @@ class Sift implements ProjectRegistry, LogicHost, GraphHost, vscode.Disposable {
   private readonly callees = new CallTreeProvider("callees");
   private readonly decorations = new OutOfDateDecorations(this);
   private readonly statusBar = new SiftStatusBar(this);
+  readonly edits = new EditController(this);
   readonly logic = new LogicDocuments(this);
   readonly graphs = new GraphPanels(this);
   private readonly disposables: vscode.Disposable[] = [];
@@ -59,6 +63,7 @@ class Sift implements ProjectRegistry, LogicHost, GraphHost, vscode.Disposable {
       this.logic,
       this.logic.register(),
       this.graphs,
+      this.edits,
       vscode.workspace.onDidChangeWorkspaceFolders(() => this.syncFolders()),
       vscode.workspace.onDidSaveTextDocument((doc) => this.onSaved(doc)),
     );
@@ -102,6 +107,8 @@ class Sift implements ProjectRegistry, LogicHost, GraphHost, vscode.Disposable {
     command("sift.showImpactOfChanges", () => this.showImpactOfChanges());
     command("sift.openLogic", (uri?: vscode.Uri) => this.openLogic(uri));
     command("sift.openSourceOfLogic", () => this.openSourceOfLogic());
+    command("sift.editUnit", (uri?: vscode.Uri) => this.editAtCursor(uri));
+    command("sift.undoEdit", () => this.edits.undoCommand());
     command("sift.openUnit", (root: string, ref: string) => this.openUnit(root, ref));
     command("sift.openRange", (root: string, file: string, range: SourceRange) => this.openRange(root, file, range));
     command("sift.openCallSite", (node?: { project: Project; hit: { via: { file: string; sites: { range: SourceRange }[] } } }) => {
@@ -455,6 +462,22 @@ class Sift implements ProjectRegistry, LogicHost, GraphHost, vscode.Disposable {
     await this.logic.open(project, path, { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true });
   }
 
+  /** Open the logic of the unit at the cursor with the unit ready for editing (phase-2-design §8.1). */
+  private async editAtCursor(uri?: vscode.Uri): Promise<void> {
+    const { project, ref } = await this.unitAtCursor(uri);
+    const file = ref.slice(0, ref.indexOf("#"));
+    const logic = await project.server.request("sift/logicFile", { source: file });
+    const unit = logic.units.find((u) => u.ref === ref);
+    if (!unit) throw new UserError(`${ref.slice(ref.indexOf("#") + 1)} has no description yet. Describe the file first, then edit its logic.`);
+    if (unit.freshness !== "fresh" || unit.status === "stale") throw new UserError(`The description of ${ref.slice(ref.indexOf("#") + 1)} is out of date. Update it first, so the edit starts from what the code does now.`);
+    await this.editInLogic(project, file, unit.unit.id);
+  }
+
+  /** Open a file's logic beside the code with a unit ready for editing. */
+  async editInLogic(project: Project, file: string, unitId: string): Promise<void> {
+    await this.logic.open(project, file, { reveal: unitId, edit: unitId, viewColumn: vscode.ViewColumn.Beside });
+  }
+
   /** From a logic document, open its source file beside it. */
   private async openSourceOfLogic(): Promise<void> {
     const active = this.logic.activeSource();
@@ -532,11 +555,23 @@ class UserError extends Error {}
 
 let instance: Sift | null = null;
 
-export function activate(context: vscode.ExtensionContext): { projects: () => readonly Project[]; logicViews: () => readonly LogicView[]; graphViews: () => readonly GraphPanel[] } {
+export function activate(context: vscode.ExtensionContext): {
+  projects: () => readonly Project[];
+  logicViews: () => readonly LogicView[];
+  graphViews: () => readonly GraphPanel[];
+  reviewViews: () => readonly ReviewPanel[];
+  edits: () => EditController | undefined;
+} {
   instance = new Sift(context);
   instance.activate();
   // Returned for integration tests.
-  return { projects: () => instance?.projects ?? [], logicViews: () => instance?.logic.views ?? [], graphViews: () => instance?.graphs.views ?? [] };
+  return {
+    projects: () => instance?.projects ?? [],
+    logicViews: () => instance?.logic.views ?? [],
+    graphViews: () => instance?.graphs.views ?? [],
+    reviewViews: () => instance?.edits.reviews.views ?? [],
+    edits: () => instance?.edits,
+  };
 }
 
 export async function deactivate(): Promise<void> {

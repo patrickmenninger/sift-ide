@@ -1,4 +1,4 @@
-import type { LogicFile, NavTarget } from "@sift/core";
+import type { ChangeRequest, DescriptionEdit, LogicFile, NavTarget } from "@sift/core";
 
 /**
  * Messages between the extension host and the logic document webview (phase-2-design §6.1).
@@ -18,7 +18,20 @@ export interface LogicDocumentState {
   error: string | null;
   /** The source file has unsaved changes in an editor; the document describes the saved file. */
   dirty: boolean;
+  /** Open change requests for this file's units (phase-2-design §8), newest first. */
+  edits: UnitEdit[];
+  /** Where proposing sends code (null: the project has no AI provider). */
+  provider: { id: string; local: boolean } | null;
 }
+
+/** A change request and what the host is doing with it right now. */
+export interface UnitEdit {
+  request: ChangeRequest;
+  /** A stage of proposing (`planning`, `coding`, …), `checks`, or `applying`; null when idle. */
+  activity: EditActivity | null;
+}
+
+export type EditActivity = "starting" | "planning" | "coding" | "fixing" | "validating" | "describing" | "verifying" | "checks" | "applying" | "undoing";
 
 /** A step (or, without `stepId`, a whole unit). */
 export interface StepRef {
@@ -33,7 +46,11 @@ export type HostMessage =
   /** Scroll to a unit and expand it (after navigating to it). */
   | { type: "reveal"; unitId: string }
   /** Where a step's calls lead, for the hover card (asked with `targets`). `pinned`: shown after Ctrl+click found nothing to open. */
-  | { type: "targets"; at: StepRef; targets: NavTarget[]; pinned: boolean };
+  | { type: "targets"; at: StepRef; targets: NavTarget[]; pinned: boolean }
+  /** A `draft` was handled (saved, or refused); the state sent before this one shows the outcome. */
+  | { type: "draftSaved"; unitId: string; seq: number }
+  /** Open a unit for editing and scroll to it. */
+  | { type: "edit"; unitId: string };
 
 export type WebviewMessage =
   | { type: "ready" }
@@ -49,4 +66,19 @@ export type WebviewMessage =
   | { type: "openTarget"; target: UnitTarget; source: boolean }
   | { type: "verify"; unitId: string }
   /** Describe or update this file's units (asks with an estimate first). */
-  | { type: "describe" };
+  | { type: "describe" }
+  // Editing (phase-2-design §8.1). The host finds the unit's open change request itself.
+  /** Save the unit's draft: create its change request, or change it. Nothing asked for discards it. */
+  | { type: "draft"; unitId: string; edits: DescriptionEdit[]; request: string; seq: number }
+  /** Save the draft, then plan and write the change. */
+  | { type: "propose"; unitId: string; edits: DescriptionEdit[]; request: string; seq: number }
+  /** Stop a running proposal. */
+  | { type: "cancel"; id: string }
+  /** Answer the open questions, then propose again. */
+  | { type: "answer"; id: string; answers: { questionId: string; answer: string }[] }
+  /** Open the review panel of a ready change. */
+  | { type: "review"; id: string }
+  /** Reject the change request. */
+  | { type: "discard"; id: string }
+  /** Start a request whose code changed over from the current code, and propose it again. */
+  | { type: "replan"; id: string };
