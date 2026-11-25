@@ -1,6 +1,6 @@
 # Sift — Phase 2 Design: MCP Server, VS Code Extension, Natural-Language Editing
 
-Status: draft v0 · Scope: Phase 2 of [requirements.md](../requirements.md) · Builds on [design.md](design.md) (Phase 1)
+Status: released in 0.2.0 (M9–M17) · Scope: Phase 2 of [requirements.md](../requirements.md) · Builds on [design.md](design.md) (Phase 1)
 
 ## 1. Scope
 
@@ -235,7 +235,7 @@ Every node opens its logic on click (Alt+click: source). Edges drawn dashed for 
 - **Callers / Callees views.** The unit at the cursor is found from the file's extraction (innermost non-module unit, else the module unit), so it works for undescribed code too. Each level is one `sift/callers`/`sift/callees` request at depth 1, expanded lazily; routes and events are leaves. Icons show edge confidence (`resolved` and `language-server` filled/outlined checks, `rule` a ruler, `name-match`/`inferred` a question mark); callees list propagated effects first; gaps are a collapsed group at the end. Clicking a unit opens its source; the inline action opens the call site.
 - **Generating.** Describe This File / Describe Folder / Update Out-of-Date (and the inline action on Out of Date groups and entries) run a dry run first and show a modal: units by task and model, possible context checks, renames and deletions done without AI, and where the code is sent. Sift has no price table, so the estimate is in units and models, not money. Renames and deletions with no AI work still ask before writing. The run shows per-unit progress and is cancellable; one run at a time. `sift.updateOnSave: ask` offers an update after a save that leaves the file out of date; "Not now" holds until the file's logic is current again.
 - **Sift: Initialize** runs `server.mjs init <folder>` and starts the server.
-- **Tests.** vitest covers the vscode-free modules against an in-process server (`test-support.ts`: a fake child process over in-memory pipes): lifecycle, crash restarts and giving up, start failures, status coalescing, the dry-run summary. `npm run test:vscode` runs `test/integration.cjs` in a downloaded VS Code on a fixture copy: activation, status, a new file appearing, Show Callers/Callees, command registration, restart. It is not part of `npm run verify` (it opens a window and downloads VS Code); CI on three platforms is still to come (§11).
+- **Tests.** vitest covers the vscode-free modules against an in-process server (`test-support.ts`: a fake child process over in-memory pipes): lifecycle, crash restarts and giving up, start failures, status coalescing, the dry-run summary. `npm run test:vscode` runs `test/integration.cjs` in a downloaded VS Code on a fixture copy: activation, status, a new file appearing, Show Callers/Callees, command registration, restart. It is not part of `npm run verify` (it opens a window and downloads VS Code); CI runs it on Windows, macOS, and Linux (`.github/workflows/ci.yml`, M17), under `xvfb-run` on Linux.
 - Limits found along the way are listed in [extension-limits.md](extension-limits.md).
 
 ### 6.7 As Built (M12): Logic Document

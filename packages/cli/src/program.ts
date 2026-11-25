@@ -30,7 +30,7 @@ function adapterFor(path: string): LanguageAdapter {
   return adapter;
 }
 
-export const VERSION = "0.1.0";
+export const VERSION = "0.2.0";
 
 /** Exit codes shared by every command. `check` uses 1 for "found problems". */
 export const EXIT = { ok: 0, problems: 1, error: 2 } as const;

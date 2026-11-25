@@ -6,8 +6,10 @@ Sift reads your source code and writes a plain-language description of every fun
 
 - [Requirements](requirements.md)
 - [Phase 1 design](docs/design.md)
+- [Phase 2 design](docs/phase-2-design.md)
+- [Changelog](CHANGELOG.md)
 
-> Sift is in early development (Phase 2: the command-line tool, an MCP server for AI agents, and a VS Code extension). It supports TypeScript and JavaScript.
+> Sift 0.2 (Phase 2) is the command-line tool, an MCP server for AI agents, a VS Code extension, and natural-language editing. It is in early development, supports TypeScript and JavaScript, and is not published to npm or the VS Code marketplace yet.
 
 ## What you need
 
@@ -151,7 +153,7 @@ Edit what a function should do, in its description or in your own words, and Sif
 
 ```bash
 sift edit AccountService.withdraw --request "Reject amounts of zero or less"
-sift edit AccountService.transferFunds --step s_b2v7 --text "Save both accounts inside one database transaction."
+sift edit AccountService.transferFunds --step s_b2v7 --text "If the amount is zero or less, stop with a validation error."
 ```
 
 Sift plans the change (and asks if the request leaves something important open: what happens on failure, transaction boundaries, who may do it), writes the code for that unit only, checks that it parses, type-checks, and changes nothing outside the request, describes the new code, and compares that with what you asked. It prints the plan, the logic diff, the code diff, the scope (what else may be affected, and which routes reach it), and the checks. Then:
@@ -167,6 +169,8 @@ sift edit list                   # open change requests
 - A change that reaches other units (callers of a changed signature, other implementations) is shown as a broader change and needs `--confirm-broader`.
 - If the code changes before you apply, the request is marked for review and is never applied to code it wasn't written against (`sift edit replan <id>` starts it over).
 - `sift edit checks <id>` runs the commands in `edit.checks` (below) against a temporary copy of the project with the change. Generated code is never run unless you ask.
+
+Edits replace functions, methods, and components (and may add imports); they can't yet change an interface, type alias, or class declaration. A request that needs one changed first, such as saving two accounts in one transaction through a repository interface that has no such method, stops with an explanation of what to change by hand.
 
 Change requests are kept in `.sift/edits/` (git-ignored). Planning and code generation use the frontier tier (Opus 5.5); describing the new code and the intent check use the mid tier.
 
@@ -288,6 +292,8 @@ npm run sift -- --help
 npm run test:vscode # extension integration tests in a downloaded VS Code (opens a window; run `npm run build` first)
 npm run package:vscode
 ```
+
+CI (`.github/workflows/ci.yml`) runs `verify` and the extension integration tests on Windows, macOS, and Linux, and keeps the `.vsix` built on Linux.
 
 | Package | Purpose |
 |---|---|

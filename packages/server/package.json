@@ -1,6 +1,6 @@
 {
   "name": "@sift/server",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Sift's engine over JSON-RPC (sift serve), for editors such as the VS Code extension.",
   "type": "module",
@@ -13,7 +13,7 @@
     }
   },
   "dependencies": {
-    "@sift/core": "0.1.0",
+    "@sift/core": "0.2.0",
     "vscode-jsonrpc": "9.0.3"
   }
 }
