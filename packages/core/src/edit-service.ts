@@ -755,6 +755,7 @@ class Run {
       types: this.extracted.typeRefs.map((t) => unitId(t.file, t.symbol)),
       routes,
       examples,
+      imports: this.fileText.slice(0, endOfImports(this.fileText)),
     });
     return this.ask("edit-plan", input.prompt, PLAN_SCHEMA, (json) => {
       const v = validatePlan(json, ref, (r) => graph.unit(r) !== undefined);
@@ -925,6 +926,7 @@ class Run {
       const previous = isMain ? this.draft : current!;
       const effects = effectsOfUnit(unit, this.host.rules).effects;
       const lite = unit.isSmall && !clearsLite(effects) && previous.lite === true;
+      const started = Date.now();
       const { unit: described, report } = await redescribeUnit({
         root: this.host.root,
         config: this.host.config,
@@ -943,7 +945,7 @@ class Run {
         cache: new SiftCache(this.host.root),
         ...(this.options.signal ? { signal: this.options.signal } : {}),
       });
-      this.addUsage(report.usage, "update");
+      this.addUsage(report.usage, "update", Date.now() - started);
       if (!described) throw new SiftError("PROVIDER_FAILED", `The description of the proposed ${ref} could not be written.`, report.failed.flatMap((f) => [f.reason, ...f.problems]));
       const uncovered = report.described[0]?.uncovered ?? [];
       // Provenance: the person's pieces stay theirs while their text is unchanged; nothing is verified any more.

@@ -6,3 +6,12 @@ configs:
     tasks: {}
   - name: describe-on-frontier
     tasks: { describe: frontier, update: frontier }
+
+# Configurations for `sift eval --edits --matrix` (phase-2-design §8.11, §9): the editing tasks on
+# their recommended tiers, and edit-plan one tier down (its minimum), which it moves to only if the
+# evaluation shows mid matches frontier on question recall and scope.
+edits:
+  - name: recommended
+    tasks: {}
+  - name: edit-plan-on-mid
+    tasks: { edit-plan: mid }

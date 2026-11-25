@@ -22,6 +22,8 @@ export const TASK_TIERS: Record<Task, { recommended: Tier; minimum: Tier }> = {
   "edit-plan": { recommended: "frontier", minimum: "mid" },
   "edit-code": { recommended: "frontier", minimum: "frontier" },
   "edit-verify": { recommended: "mid", minimum: "mid" },
+  // The edit evaluation's judge (phase-2-design §9), like `judge`.
+  "edit-judge": { recommended: "frontier", minimum: "frontier" },
 };
 
 /** Higher is stronger. */

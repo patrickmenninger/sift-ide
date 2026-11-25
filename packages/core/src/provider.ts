@@ -3,7 +3,7 @@
  * Prompt content is provider-neutral; providers handle only transport and formatting.
  */
 
-export const TASKS = ["describe", "describe-lite", "update", "context-check", "judge", "edit-plan", "edit-code", "edit-verify"] as const;
+export const TASKS = ["describe", "describe-lite", "update", "context-check", "judge", "edit-plan", "edit-code", "edit-verify", "edit-judge"] as const;
 export type Task = (typeof TASKS)[number];
 
 export const TIERS = ["frontier", "mid", "small"] as const;

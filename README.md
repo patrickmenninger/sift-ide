@@ -312,4 +312,6 @@ sift eval --matrix                # every configuration in eval/matrix.yaml, 3 r
 sift eval --no-judge              # deterministic metrics only
 ```
 
-Each run writes `eval/results/<timestamp>.json` and a Markdown report with the summary table and every finding. The fixture itself is never changed. Change a prompt (`packages/core/prompts/*.md`, and bump its `version`) only if no configuration in the matrix gets noticeably worse.
+Each run writes `eval/results/<timestamp>.json` and a Markdown report with the summary table and every finding. The fixture itself is never changed.
+
+`sift eval --edits` evaluates natural-language editing instead: it describes a copy of the fixture, runs each change request in `eval/edits/bank-app.yaml` up to review (nothing is applied), and reports type-checks, targeting (only the expected units changed), intent (judged), question recall and unneeded questions, rewording accuracy, cost, and latency against the targets in [phase-2-design §9](docs/phase-2-design.md#9-evaluation-of-editing). `--case <id…>` runs some cases; `--matrix` uses the `edits` list in `eval/matrix.yaml`. Results go to `eval/results/<timestamp>-edits.*`. Change a prompt (`packages/core/prompts/*.md`, and bump its `version`) only if no configuration in the matrix gets noticeably worse.
