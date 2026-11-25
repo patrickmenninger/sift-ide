@@ -514,6 +514,20 @@ The fixture's stubs mean it cannot run, so behavioural correctness is judged, no
 
 Initial exit targets (tuned on the first baseline, like design §4.4): type-checks 100% after retry, targeted ≥ 90%, intent acceptable ≥ 85% with none wrong on the frontier tier, question recall ≥ 80%, reword accuracy 100%.
 
+### 9.1 As Built (M16): Edit Evaluation
+
+No new libraries. Harness: `edit-cases.ts` (the edit set), `edit-eval.ts` (runner, checks, metrics), `edit-judge.ts`, `edit-report.ts`; core: task `edit-judge` (frontier, minimum frontier, effort high) and prompt `edit-judge@1`.
+
+- **Edit set** (`eval/edits/bank-app.yaml`, 17 cases): step rewrites, added and deleted steps, free-form requests, two ambiguous requests, a type change (`formatCents` to `bigint`) that reaches `BalanceCard`, an interface implementation (`PrismaAccountRepository.save`), three accurate rewordings (summary, step, input), and a false one. Steps are named by a piece of the code they cover (the step owning the innermost statement that contains it), since step IDs differ between runs. `answers` is what the person says to any question.
+- **Expectations**: `kind`, `reword` (true: accepted with no code; false: never accepted as a rewording; a planner that turns a false wording into a behaviour change passes, as `edit-plan` is told to), `changedUnits` (exact), `broader`, `effectsAdded`/`effectsRemoved`, `asks` (topics, matched by the judge), `questionsOk`, `mustMention` (what the change must do, judged on the diff).
+- **Run** (`sift eval --edits [--case …] [--matrix] [--tier …] [--no-judge]`): a fresh fixture copy per configuration and repeat; `generate` describes it; then each case is created, proposed, and answered (at most three rounds) through `Workspace.edits`, concurrently up to `concurrency`. Nothing is applied; each request is rejected afterwards. A matrix configuration's tiers go into the copy's `sift.config.yaml`. `eval/matrix.yaml` gained an `edits` list (`recommended`, `edit-plan-on-mid`). Results: `eval/results/<timestamp>-edits.json` and `.md`; the command exits 1 when a configuration misses a §9 target.
+- **Judge** (`edit-judge`): the code before, what was asked (as the edit prompts render it), the questions with their answers, the diff, the description re-derived from the new code, the expected ideas and questions. It returns per-idea and per-question matches, and `intent` (`correct` / `minor-issues` / `wrong`, `null` without a diff). It runs only where there is a code change or an expected question.
+- **Metrics** as in the table above. Type-checks counts behaviour proposals and failures with parse or type errors after the retry; question recall counts expected topics asked in any round; unneeded questions counts first-round questions in cases that expected none (unless `questionsOk`); latency is AI time per edit, judge excluded.
+- **Prompt iteration.** Baseline with `edit-plan@1` on Opus 5.5 met every target. Its one failure, `transfer-transaction`, came from the plan naming `AccountRepository.save`, an interface member, which Sift cannot change (only units can be replaced). With `edit-plan` on mid (Sonnet 5.5), the same gap showed as type errors (calling a repository method no interface declares) in two cases, so type-checks fell to 86%: **`edit-plan` stays on frontier** (§8.11). `edit-plan@2` says what can change (units only; adding imports is allowed) and that a change needing a declaration changed first is `unclear` with that explanation. The plan input now also carries the edited file's import block: without it, the planner believed `ValidationError` did not exist.
+- **Baseline** (`2026-11-25T14-55-40Z-edits`, recommended routing): type-checks 100% (13/13), targeted 100% (12/12), intent acceptable 100% (13 judged, 0 wrong), question recall 100%, unneeded questions 0%, rewording 100% (4/4), mentions 94%; about $0.10 per edit and 18 s mean (30 s p95) of AI time. The judge is self-graded (same vendor). The one case not done is `transfer-transaction`, which now fails with an explanation naming the interface to change first.
+- Engine fix found along the way: the re-derivation's time was not added to the request's per-task usage.
+- Limit found: changes that need an interface, type, or class declaration edited are out of reach until edits can target declarations (§13).
+
 ## 10. Engine and Extension Testing
 
 - **Core:** workspace refresh and events; `sourceRanges` / `stepAt` on the fixture; schema v1 read/write and v0 → v1 upgrade (byte-stable for untouched files); change-request state machine; scope check; pending-edit invalidation; undo pre-image checks. All with `FakeProvider`.
@@ -555,5 +569,6 @@ M9 is the only hard bottleneck. After it, three tracks can run side by side on s
 - Natural-language diff presentation details (word-level inline vs side by side) — start inline, revisit after use (open question §15.3).
 - Whether `edit-plan` and `edit-code` merge into one call for simple edits, to cut cost, once the evaluation shows it holds quality.
 - MCP tools that propose (not apply) edits for agents.
+- Edits that change declarations (interface members, type aliases, classes and their fields), so a change such as a repository transaction can be planned in one request (§9.1).
 - Automatic re-description on save (beyond `ask`).
 - Recording "limits that would justify a fork" (requirements §9.1): kept as a running list in `docs/extension-limits.md` from M11 on.

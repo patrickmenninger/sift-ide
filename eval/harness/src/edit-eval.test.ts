@@ -180,7 +180,7 @@ describe("edit evaluation", { timeout: 180_000 }, () => {
     // Judged on frontier, and only where there is a change or an expected question.
     expect(provider.requests.filter((q) => q.task === "edit-judge").map((q) => q.model.model)).toEqual(["claude-opus-5-5", "claude-opus-5-5"]);
     expect(result.judge).toEqual({ model: "claude-opus-5-5", selfGraded: true });
-    expect(result.prompts).toMatchObject({ "edit-plan": "edit-plan@1", "edit-judge": "edit-judge@1" });
+    expect(result.prompts).toMatchObject({ "edit-plan": "edit-plan@2", "edit-judge": "edit-judge@1" });
     expect(lines).toContain("  positive: ready (behavior), correct");
 
     const summary = result.summary[0]!;

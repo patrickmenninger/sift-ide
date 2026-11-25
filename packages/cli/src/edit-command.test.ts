@@ -90,6 +90,7 @@ describe("sift edit", { timeout: 90_000 }, () => {
     expect(byTask("edit-verify")[0]!.model.model).toBe("claude-sonnet-5-5");
     expect(byTask("edit-plan")[0]!.prompt).toContain("Request:\nReject amounts of zero or less");
     expect(byTask("edit-plan")[0]!.prompt).toContain("/*[0]*/ const account = await this.repo.getAccount(accountId);");
+    expect(byTask("edit-plan")[0]!.prompt).toContain(`Imports of ${SERVICE}:\n${"```"}ts\nimport { ForbiddenError, ValidationError`);
     expect(byTask("edit-code")[0]!.prompt).toContain(`## ${WITHDRAW} (method) — the edited unit`);
     expect(byTask("edit-code")[0]!.prompt).toContain("export interface Account {");
     const update = provider.requests.filter((q) => q.task === "update").at(-1)!;

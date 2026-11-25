@@ -108,11 +108,14 @@ export interface PlanInput {
   routes: string[];
   /** Units elsewhere in the project, by effect, that show how the project does things. */
   examples: { effect: string; units: Neighbour[] }[];
+  /** The edited file's import block: what the unit can already use. */
+  imports?: string;
 }
 
 export function renderPlanInput(input: PlanInput): { prompt: string; redactions: number } {
   const code = redactSecrets(input.unit.code);
   const lines = [`File: ${input.file}`, `Unit: ${input.unit.ref} (${input.unit.kind})`, `Signature: ${oneLine(input.unit.signature)}`, "", "Code:", "```" + fence(input.file), code.text, "```"];
+  if (input.imports !== undefined) lines.push("", `Imports of ${input.file}:`, "```" + fence(input.file), input.imports.trim() === "" ? "// (no imports)" : redactSecrets(input.imports.trimEnd()).text, "```");
   lines.push("", "Current description (step `covers` are the structure keys in the code markers):", "```json", descriptionJson(input.description), "```");
   const note = personWordingNote(input.description);
   if (note) lines.push("", note);
