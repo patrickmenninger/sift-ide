@@ -2,10 +2,11 @@ import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { basename, join } from "node:path";
 import * as vscode from "vscode";
-import type { SourceRange, SourceRanges } from "@sift/core";
+import type { ChangeRequest, SourceRange, SourceRanges } from "@sift/core";
+import type { EditController } from "./edits.js";
 import { logicOfSource, planNavigation, sourceOfLogic } from "./logic-model.js";
 import type { Project } from "./project.js";
-import type { HostMessage, LogicDocumentState, StepRef, UnitTarget, WebviewMessage } from "./webview/protocol.js";
+import type { HostMessage, LogicDocumentState, StepRef, UnitEdit, UnitTarget, WebviewMessage } from "./webview/protocol.js";
 
 /** What the logic documents need from the rest of the extension. */
 export interface LogicHost {
@@ -14,6 +15,8 @@ export interface LogicHost {
   /** Describe or update a source file's units (estimate first). */
   describe(uri: vscode.Uri): Promise<void>;
   showError(err: unknown): void;
+  /** Change requests: drafts, proposing, review (phase-2-design §8, M15). */
+  readonly edits: EditController;
 }
 
 export const LOGIC_VIEW_TYPE = "sift.logic";
@@ -22,6 +25,8 @@ export const LOGIC_VIEW_TYPE = "sift.logic";
  * Logic documents (phase-2-design §6.1–6.4, M12): a custom editor for `.sift` files, also opened
  * for a source file with **Sift: Open Logic**. Step ↔ source highlighting both ways, Ctrl+click
  * navigation with an implementation picker, hover cards for calls, status badges, and Verify.
+ * Editing (M15): drafts on units, proposing, questions, and requests whose code changed; the
+ * work is the host's `EditController`.
  *
  * A source file with no `.sift` file yet gets a plain webview panel with the same document, since
  * a custom editor needs a file to open.
@@ -30,6 +35,8 @@ export class LogicDocuments implements vscode.CustomTextEditorProvider, vscode.D
   private readonly viewSet = new Set<LogicView>();
   /** Unit to scroll to when a document opening for (root, source) is ready. */
   private readonly pendingReveal = new Map<string, string>();
+  /** Unit to open for editing when a document opening for (root, source) is ready. */
+  private readonly pendingEdit = new Map<string, string>();
   private readonly disposables: vscode.Disposable[] = [];
   private readonly selectionTimers = new Map<LogicView, ReturnType<typeof setTimeout>>();
   private hoverSeq = 0;
@@ -100,16 +107,18 @@ export class LogicDocuments implements vscode.CustomTextEditorProvider, vscode.D
    * Open the logic of a source file: its `.sift` file in the logic editor, or a panel when it has
    * none yet. An open document for the file is reused.
    */
-  async open(project: Project, source: string, options: { reveal?: string; viewColumn?: vscode.ViewColumn; preserveFocus?: boolean } = {}): Promise<void> {
+  async open(project: Project, source: string, options: { reveal?: string; edit?: string; viewColumn?: vscode.ViewColumn; preserveFocus?: boolean } = {}): Promise<void> {
     const viewColumn = options.viewColumn ?? vscode.ViewColumn.Beside;
     const preserveFocus = options.preserveFocus ?? false;
     const existing = this.views.find((v) => v.project === project && v.source === source);
     if (existing) {
       existing.panel.reveal(existing.panel.viewColumn ?? viewColumn, preserveFocus);
       if (options.reveal) existing.post({ type: "reveal", unitId: options.reveal });
+      if (options.edit) existing.post({ type: "edit", unitId: options.edit });
       return;
     }
     if (options.reveal) this.pendingReveal.set(viewKey(project, source), options.reveal);
+    if (options.edit) this.pendingEdit.set(viewKey(project, source), options.edit);
     const logicFile = join(project.root, logicOfSource(source));
     if (existsSync(logicFile)) {
       await vscode.commands.executeCommand("vscode.openWith", vscode.Uri.file(logicFile), LOGIC_VIEW_TYPE, { viewColumn, preserveFocus });
@@ -140,11 +149,13 @@ export class LogicDocuments implements vscode.CustomTextEditorProvider, vscode.D
   }
 
   /** Called by a view once its webview is listening. */
-  takePendingReveal(view: LogicView): string | undefined {
+  takePending(view: LogicView): { reveal?: string; edit?: string } {
     const key = viewKey(view.project, view.source);
-    const unitId = this.pendingReveal.get(key);
+    const reveal = this.pendingReveal.get(key);
+    const edit = this.pendingEdit.get(key);
     this.pendingReveal.delete(key);
-    return unitId;
+    this.pendingEdit.delete(key);
+    return { ...(reveal ? { reveal } : {}), ...(edit ? { edit } : {}) };
   }
 
   // ── Logic → source ───────────────────────────────────────────────────────────────────────
@@ -276,6 +287,8 @@ export class LogicView implements vscode.Disposable {
   private ready = false;
   private loading: Promise<void> | null = null;
   private again = false;
+  /** Open change requests on this file's units, newest first. */
+  private requests: ChangeRequest[] = [];
   private rangeCache = new Map<string, Promise<SourceRanges>>();
   private readonly disposables: vscode.Disposable[] = [];
   /** The last messages sent to the webview, newest last (integration tests read them). */
@@ -291,7 +304,7 @@ export class LogicView implements vscode.Disposable {
   ) {
     this.sourceUri = vscode.Uri.joinPath(vscode.Uri.file(project.root), source);
     const open = vscode.workspace.textDocuments.find((d) => sameUri(d.uri, this.sourceUri));
-    this.state = { source, file: null, error: null, dirty: open?.isDirty ?? false };
+    this.state = { source, file: null, error: null, dirty: open?.isDirty ?? false, edits: [], provider: project.server.info?.provider ?? null };
     const dist = vscode.Uri.joinPath(host.extensionUri, "dist");
     panel.webview.options = { enableScripts: true, localResourceRoots: [dist] };
     panel.iconPath = vscode.Uri.joinPath(host.extensionUri, "media", "sift.svg");
@@ -301,6 +314,9 @@ export class LogicView implements vscode.Disposable {
       // Every refresh (a file saved, descriptions written) can change freshness and text.
       project.onDidChangeStatus(() => void this.reload()),
       project.server.onDidChangeState((s) => s.kind === "running" && void this.reload()),
+      // Change requests created, proposed, or found to need review (phase-2-design §8.9).
+      project.server.on("sift/didChange", (change) => change.type === "edits" && void this.reloadEdits()),
+      host.edits.onDidChangeActivity(() => this.postEdits()),
     );
     void this.reload();
   }
@@ -312,8 +328,9 @@ export class LogicView implements vscode.Disposable {
         case "ready": {
           this.ready = true;
           this.post({ type: "state", state: this.state });
-          const reveal = this.docs.takePendingReveal(this);
-          if (reveal) this.post({ type: "reveal", unitId: reveal });
+          const pending = this.docs.takePending(this);
+          if (pending.reveal) this.post({ type: "reveal", unitId: pending.reveal });
+          if (pending.edit) this.post({ type: "edit", unitId: pending.edit });
           const editor = sourceEditors(this)[0];
           if (editor) await this.docs.syncCurrent(this, editor);
           return;
@@ -337,10 +354,64 @@ export class LogicView implements vscode.Disposable {
           return await this.verify(message.unitId);
         case "describe":
           return await this.host.describe(this.sourceUri);
+        case "draft":
+          await this.saveDraft(message.unitId, message, message.seq);
+          return;
+        case "propose": {
+          const saved = await this.saveDraft(message.unitId, message, message.seq);
+          if (saved) await this.host.edits.propose(this.project, saved.id);
+          return;
+        }
+        case "cancel":
+          return this.host.edits.cancel(this.project, message.id);
+        case "answer":
+          return await this.host.edits.answer(this.project, message.id, message.answers);
+        case "review":
+          await this.host.edits.reviews.show(this.project, message.id);
+          return;
+        case "discard":
+          await this.host.edits.reject(this.project, message.id);
+          return await this.reloadEdits();
+        case "replan":
+          return await this.host.edits.replan(this.project, message.id);
       }
     } catch (err) {
       this.host.showError(err);
     }
+  }
+
+  /**
+   * Save a unit's draft as its change request. The webview hears that the draft was handled (saved
+   * or refused) after the state that shows it, so it can drop its own copy.
+   */
+  private async saveDraft(unitId: string, draft: { edits: ChangeRequest["edits"]; request: string }, seq: number): Promise<ChangeRequest | undefined> {
+    try {
+      const ref = this.state.file?.units.find((u) => u.unit.id === unitId)?.ref;
+      if (!ref) throw new Error("This unit is no longer described in the file.");
+      return await this.host.edits.saveDraft(this.project, ref, unitId, { edits: draft.edits, request: draft.request });
+    } catch (err) {
+      this.host.showError(err);
+      return undefined;
+    } finally {
+      await this.reloadEdits();
+      this.post({ type: "draftSaved", unitId, seq });
+    }
+  }
+
+  /** Load the file's change requests again and show them. */
+  async reloadEdits(): Promise<void> {
+    this.requests = await this.host.edits.openRequests(this.project, this.source).catch(() => this.requests);
+    this.postEdits();
+  }
+
+  /** Show the change requests with what the host is doing with each. */
+  private postEdits(): void {
+    this.state = { ...this.state, edits: this.unitEdits(), provider: this.project.server.info?.provider ?? null };
+    this.post({ type: "state", state: this.state });
+  }
+
+  private unitEdits(): UnitEdit[] {
+    return this.requests.map((request) => ({ request, activity: this.host.edits.activity(this.project, request.id) }));
   }
 
   post(message: HostMessage): void {
@@ -362,7 +433,8 @@ export class LogicView implements vscode.Disposable {
           this.rangeCache = new Map();
           try {
             const file = await this.project.server.request("sift/logicFile", { source: this.source });
-            this.state = { ...this.state, file, error: null };
+            this.requests = await this.host.edits.openRequests(this.project, this.source).catch(() => this.requests);
+            this.state = { ...this.state, file, error: null, edits: this.unitEdits(), provider: this.project.server.info?.provider ?? null };
           } catch (err) {
             this.state = { ...this.state, file: null, error: err instanceof Error ? err.message : String(err) };
           }
@@ -444,8 +516,8 @@ function toRange(r: SourceRange): vscode.Range {
   return new vscode.Range(r.start.line - 1, r.start.col - 1, r.end.line - 1, r.end.col - 1);
 }
 
-/** A webview page loading one of the bundles in dist/ (`webview` for logic, `graph` for graph views). */
-export function documentHtml(webview: vscode.Webview, dist: vscode.Uri, entry: "webview" | "graph" = "webview", title = "Logic"): string {
+/** A webview page loading one of the bundles in dist/ (`webview` for logic, `graph` for graph views, `review` for a proposed edit). */
+export function documentHtml(webview: vscode.Webview, dist: vscode.Uri, entry: "webview" | "graph" | "review" = "webview", title = "Logic"): string {
   const nonce = randomBytes(16).toString("base64");
   const script = webview.asWebviewUri(vscode.Uri.joinPath(dist, `${entry}.js`));
   const style = webview.asWebviewUri(vscode.Uri.joinPath(dist, `${entry}.css`));

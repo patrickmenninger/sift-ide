@@ -132,16 +132,28 @@ describe("sift serve protocol", () => {
     const proposed = ready.proposal!.files[0]!.text;
     await expect(client.request("sift/edit/apply", { id: draft.id, sourceWritten: true })).rejects.toThrow("does not hold the proposed change");
     await writeFile(join(dir, SERVICE), proposed);
-    const applied = await client.request("sift/edit/apply", { id: draft.id, sourceWritten: true });
+    // What the editor replaced must be the text the change was proposed for.
+    await expect(client.request("sift/edit/apply", { id: draft.id, sourceWritten: true, sourceBefore: { [SERVICE]: `${original}// edited
+` } })).rejects.toThrow("is not the text the change was proposed for");
+    const applied = await client.request("sift/edit/apply", { id: draft.id, sourceWritten: true, sourceBefore: { [SERVICE]: original } });
     expect(applied.written).toEqual([`.sift/${SERVICE}.sift`]);
     expect(changes).toContainEqual({ type: "descriptions", files: [`.sift/${SERVICE}.sift`] });
     const logic = await client.request("sift/logicFile", { source: SERVICE });
     expect(logic.units.find((u) => u.unit.symbol === "AccountService.withdraw")!.freshness).toBe("fresh");
 
-    // Undo restores what Sift wrote (the description); the source is the editor's to undo.
+    // Undo restores the description and, since the editor said what it replaced, the source.
     const undone = await client.request("sift/edit/undo", { id: draft.id });
-    expect(undone.restored).toEqual([`.sift/${SERVICE}.sift`]);
-    expect(await readFile(join(dir, SERVICE), "utf8")).toBe(proposed);
+    expect(undone.restored).toEqual([SERVICE, `.sift/${SERVICE}.sift`]);
+    expect(await readFile(join(dir, SERVICE), "utf8")).toBe(original);
+
+    // A check for pending edits that read a request before it was rejected must not write it back
+    // as needs-review (the editor lists requests often, so the two overlap).
+    const getBalance = await client.request("sift/edit/create", { unit: "AccountService.getBalance", request: "Return the balance in whole units" });
+    await writeFile(join(dir, SERVICE), original.replace("return account.balanceCents;", "return account.balanceCents + 0;"));
+    const [, rejected] = await Promise.all([client.request("sift/edit/list", {}), client.request("sift/edit/reject", { id: getBalance.id })]);
+    expect(rejected.state).toBe("rejected");
+    await client.request("sift/edit/list", {});
+    expect((await client.request("sift/edit/get", { id: getBalance.id })).state).toBe("rejected");
     await writeFile(join(dir, SERVICE), original);
     expect((await client.request("sift/status", { paths: [SERVICE] })).inSync).toBe(true);
     client.dispose();

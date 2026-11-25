@@ -7,7 +7,7 @@ Sift reads your source code and writes a plain-language description of every fun
 - [Requirements](requirements.md)
 - [Phase 1 design](docs/design.md)
 
-> Sift is in early development (Phase 2: the command-line tool and an MCP server for AI agents). It supports TypeScript and JavaScript. A VS Code extension comes next.
+> Sift is in early development (Phase 2: the command-line tool, an MCP server for AI agents, and a VS Code extension). It supports TypeScript and JavaScript.
 
 ## What you need
 
@@ -211,7 +211,8 @@ It starts Sift for each workspace folder with a `sift.config.yaml` (no `sift` on
 - an **Out of Date** list in the Sift sidebar, grouped by reason;
 - **Callers** and **Callees** of the function at the cursor (editor context menu), with how each call was resolved and the calls Sift could not resolve;
 - **diagrams**: **Show Neighbourhood Diagram** (the function at the cursor with its callers, callees, interface implementations, routes, and events), **Show Route Flow…** (a route from its handler down to library calls, effects on each box), and **Show Impact of Changing This** / **Show Impact of Uncommitted Changes** (what may be affected, grouped by distance, with a diagram on request). Click a box to open its logic, Alt+click for its code, Shift+click for its neighbourhood; dashed lines are connections from a rule pack or a name match, and unresolved calls are listed rather than hidden;
-- **Sift: Describe This File** (editor title button), **Describe Folder** (explorer), and **Update Out-of-Date Descriptions**. Each first shows what will be sent to which models and asks; a running update can be cancelled, and the units already described are kept.
+- **Sift: Describe This File** (editor title button), **Describe Folder** (explorer), and **Update Out-of-Date Descriptions**. Each first shows what will be sent to which models and asks; a running update can be cancelled, and the units already described are kept;
+- **editing**: **Edit** on a function in its logic document (or **Sift: Edit Logic of This…** in the code) lets you rewrite its summary, input and return meanings, and steps in place, add and remove steps, or write what to change in your own words. The draft is kept until you **Propose change**; Sift then plans it (asking its questions in the document when the request leaves something open), writes and checks the code, and opens a **review**: what it understood, the logic changes word by word, the code diff (also in VS Code's diff editor), what else may be affected, which checks ran, and anything it did not do or was not asked for. **Approve and apply** writes the code through the editor (so Undo works there too) and the description; **Sift: Undo Edit…** restores both if nothing changed them since. A draft whose code changes before you apply it is marked for review and can be re-planned on the current code.
 
 `sift.updateOnSave: ask` offers an update after you save a file whose logic is now out of date. Sift never calls the AI without asking.
 

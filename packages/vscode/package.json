@@ -70,6 +70,20 @@
         "icon": "$(go-to-file)"
       },
       {
+        "command": "sift.editUnit",
+        "title": "Edit Logic of This…",
+        "category": "Sift",
+        "icon": "$(edit)",
+        "enablement": "sift.active"
+      },
+      {
+        "command": "sift.undoEdit",
+        "title": "Undo Edit…",
+        "category": "Sift",
+        "icon": "$(discard)",
+        "enablement": "sift.active"
+      },
+      {
         "command": "sift.showCallers",
         "title": "Show Callers",
         "category": "Sift",
@@ -284,6 +298,11 @@
           "command": "sift.showFlow",
           "when": "view == sift.outOfDate && sift.active",
           "group": "secondary@2"
+        },
+        {
+          "command": "sift.undoEdit",
+          "when": "view == sift.outOfDate && sift.active",
+          "group": "secondary@3"
         }
       ],
       "view/item/context": [
@@ -334,6 +353,11 @@
         {
           "command": "sift.openLogic",
           "when": "sift.active && resourceExtname =~ /.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/",
+          "group": "0_sift@0"
+        },
+        {
+          "command": "sift.editUnit",
+          "when": "sift.active && resourceExtname =~ /\\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/",
           "group": "0_sift@0"
         },
         {

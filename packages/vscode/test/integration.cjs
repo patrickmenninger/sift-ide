@@ -13,6 +13,7 @@ const ROUTES = "src/http/routes.ts";
 const allSteps = (steps) => steps.flatMap((s) => [s, ...allSteps(s.steps)]);
 const lineOf = (doc, text) => doc.getText().split("\n").findIndex((l) => l.includes(text));
 const inWorkspace = (file) => vscode.Uri.file(path.join(process.env.SIFT_TEST_WORKSPACE, file));
+const readText = (file) => require("node:fs").readFileSync(path.join(process.env.SIFT_TEST_WORKSPACE, file), "utf8");
 const endsWith = (uri, file) => uri.fsPath.replace(/\\/g, "/").endsWith(file);
 
 async function openSource(file) {
@@ -34,12 +35,12 @@ function unitOf(view, symbol) {
   return view.current.file.units.find((u) => u.unit.symbol === symbol);
 }
 
-async function waitFor(what, check, ms = 60_000) {
+async function waitFor(what, check, ms = 60_000, explain = () => "") {
   const end = Date.now() + ms;
   for (;;) {
     const value = await check();
     if (value) return value;
-    if (Date.now() > end) throw new Error(`Timed out waiting for ${what}`);
+    if (Date.now() > end) throw new Error(`Timed out waiting for ${what} ${explain()}`.trim());
     await new Promise((r) => setTimeout(r, 100));
   }
 }
@@ -121,13 +122,18 @@ const tests = [
       const line = lineOf(editor.document, "await this.repo.save(from);");
       assert.ok(line >= 0);
       const transfer = unitOf(view, "AccountService.transferFunds");
-      // Only messages after the move: the document already got one for the cursor's old place.
-      const before = view.sent.length;
+      // Only messages after the move (by identity: the list drops old entries). One for the cursor's
+      // old place may still arrive after it, so wait for the newest to be the step at the cursor.
+      const seen = new Set(view.sent);
       editor.selection = new vscode.Selection(line, 8, line, 8);
-      const current = await waitFor("the current step", () => view.sent.slice(before).find((m) => m.type === "current" && m.at && m.at.unitId === transfer.unit.id && m.at.stepId));
+      const covers = (ranges) => ranges.ranges.some((r) => r.start.line - 1 <= line && r.end.line - 1 >= line);
+      const current = await waitFor("the step at the cursor", async () => {
+        const latest = view.sent.filter((m) => !seen.has(m) && m.type === "current" && m.at && m.at.unitId === transfer.unit.id && m.at.stepId).at(-1);
+        return latest && covers(await view.ranges(latest.at)) ? latest : null;
+      });
       const ranges = await view.ranges(current.at);
       assert.equal(ranges.fresh, true);
-      assert.ok(ranges.ranges.some((r) => r.start.line - 1 <= line && r.end.line - 1 >= line), "the step's ranges include the cursor line");
+      assert.ok(covers(ranges), "the step's ranges include the cursor line");
       // Hovering highlights (decorations are not readable through the API; this checks it runs).
       await view.receive({ type: "hover", at: current.at });
       await view.receive({ type: "hover", at: null });
@@ -140,14 +146,25 @@ const tests = [
       const transfer = unitOf(view, "AccountService.transferFunds");
       const step = allSteps(transfer.unit.steps).find((s) => s.calls.length === 2);
       assert.ok(step, "a step calling both repository implementations");
-      // As when the user Ctrl+clicks in it: the document has focus.
-      view.panel.reveal(undefined, false);
-      await waitFor("the service's logic active", () => view.panel.active);
-      const navigating = view.receive({ type: "navigate", at: { unitId: transfer.unit.id, stepId: step.id }, source: false });
-      await new Promise((r) => setTimeout(r, 1000)); // the picker opens
-      await vscode.commands.executeCommand("workbench.action.acceptSelectedQuickOpenItem");
-      await navigating;
-      const opened = await waitFor("the implementation's logic", () => api.logicViews().find((v) => REPOSITORIES.includes(v.source) && v.current.file));
+      // As when the user Ctrl+clicks in it: the document has focus. Accepting the picker just as it
+      // opens can find no item active (it then closes with no choice), so try again in that case.
+      const repositoryLogic = () => api.logicViews().find((v) => REPOSITORIES.includes(v.source) && v.current.file);
+      for (let attempt = 0; attempt < 3 && !repositoryLogic(); attempt++) {
+        view.panel.reveal(undefined, false);
+        await waitFor("the service's logic active", () => view.panel.active);
+        let settled = false;
+        const navigating = view.receive({ type: "navigate", at: { unitId: transfer.unit.id, stepId: step.id }, source: false }).finally(() => (settled = true));
+        await waitFor("the picker accepted", async () => {
+          await new Promise((r) => setTimeout(r, 400));
+          await vscode.commands.executeCommand("workbench.action.acceptSelectedQuickOpenItem");
+          return settled;
+        });
+        await navigating;
+        await waitFor("the chosen logic", repositoryLogic, 5_000).catch(() => null);
+      }
+      const opened = await waitFor("the implementation's logic", repositoryLogic, 60_000, () =>
+        JSON.stringify({ views: api.logicViews().map((v) => ({ source: v.source, file: !!v.current.file, error: v.current.error })), tab: String(vscode.window.tabGroups.activeTabGroup.activeTab && vscode.window.tabGroups.activeTabGroup.activeTab.label) }),
+      );
       const reveal = await waitFor("the unit revealed", () => opened.sent.find((m) => m.type === "reveal"));
       const target = opened.current.file.units.find((u) => u.unit.id === reveal.unitId);
       assert.ok(step.calls.includes(target.unit.id));
@@ -258,6 +275,81 @@ const tests = [
     },
   ],
   [
+    "a ready change opens for review with its diff, applies through the editor, and undoes exactly",
+    async (api) => {
+      const view = await logicView(api, SERVICE);
+      const withdraw = unitOf(view, "AccountService.withdraw");
+      // run-integration.mjs proposed it before VS Code started.
+      const edit = await waitFor("the proposed change on its unit", () => view.current.edits.find((e) => e.request.unitId === withdraw.unit.id && e.request.state === "ready"));
+      const editor = await openSource(SERVICE);
+      const original = editor.document.getText();
+      const originalSift = readText(`.sift/${SERVICE}.sift`);
+
+      await view.receive({ type: "review", id: edit.request.id });
+      const review = await waitFor("the review panel", () => api.reviewViews().find((r) => r.id === edit.request.id && r.webviewReady && r.current.request));
+      assert.equal(review.current.request.state, "ready");
+      assert.match(review.panel.title, /Review: AccountService\.withdraw/);
+      await review.receive({ type: "openDiff", path: SERVICE });
+      await waitFor("the diff editor", () =>
+        vscode.window.tabGroups.all.flatMap((g) => g.tabs).some((t) => t.input instanceof vscode.TabInputTextDiff && t.input.modified.scheme === "sift-proposal" && endsWith(t.input.original, SERVICE)),
+      );
+
+      await review.receive({ type: "approve" });
+      await waitFor("applied", () => review.current.request && review.current.request.state === "applied");
+      // The open editor has exactly the reviewed code, saved (it went through a WorkspaceEdit).
+      assert.equal(editor.document.isDirty, false);
+      assert.equal(editor.document.getText(), edit.request.proposal.files[0].text);
+      assert.equal(readText(SERVICE), edit.request.proposal.files[0].text);
+      assert.match(readText(SERVICE), /Withdrawal amount must be positive/);
+      await waitFor("the new description, fresh", () => {
+        const u = unitOf(view, "AccountService.withdraw");
+        return u && u.freshness === "fresh" && u.unit.bodyHash !== withdraw.unit.bodyHash;
+      });
+      assert.ok(!view.current.edits.some((e) => e.request.id === edit.request.id), "an applied change is no longer shown on its unit");
+
+      // Undo restores the code and the description byte for byte; the editor follows.
+      await review.receive({ type: "undo" });
+      await waitFor("undone", () => review.current.request.state === "undone");
+      assert.equal(readText(SERVICE), original);
+      assert.equal(readText(`.sift/${SERVICE}.sift`), originalSift);
+      await waitFor("the editor back to the original", () => editor.document.getText() === original);
+      await waitFor("the description current again", () => unitOf(view, "AccountService.withdraw").unit.bodyHash === withdraw.unit.bodyHash);
+    },
+  ],
+  [
+    "a draft is saved as a change request on its unit; when the code changes under it, it needs review",
+    async (api) => {
+      const view = await logicView(api, SERVICE);
+      const balance = unitOf(view, "AccountService.getBalance");
+      const edits = [{ op: "set", path: "summary", before: balance.unit.summary, after: "Reads an account's balance, in cents." }];
+      await view.receive({ type: "draft", unitId: balance.unit.id, edits, request: "", seq: 7 });
+      const draft = await waitFor("the draft", () => view.current.edits.find((e) => e.request.unitId === balance.unit.id));
+      assert.equal(draft.request.state, "draft");
+      assert.deepEqual(draft.request.edits, edits);
+      assert.ok(view.sent.some((m) => m.type === "draftSaved" && m.unitId === balance.unit.id && m.seq === 7));
+
+      const editor = await openSource(SERVICE);
+      const original = editor.document.getText();
+      try {
+        const line = editor.document.lineAt(lineOf(editor.document, "return account.balanceCents;"));
+        await editor.edit((b) => b.replace(line.range, line.text.replace("return account.balanceCents;", "return account.balanceCents + 0;")));
+        await editor.document.save();
+        const marked = await waitFor("the request marked for review", () => view.current.edits.find((e) => e.request.id === draft.request.id && e.request.state === "needs-review"));
+        assert.match(marked.request.review, /code changed/);
+        await view.receive({ type: "discard", id: draft.request.id });
+        await waitFor("the request gone", () => !view.current.edits.some((e) => e.request.id === draft.request.id));
+        // Later checks for pending edits leave it rejected.
+        await api.projects()[0].refreshStatus();
+        assert.equal((await api.projects()[0].server.request("sift/edit/get", { id: draft.request.id })).state, "rejected");
+      } finally {
+        const all = new vscode.Range(editor.document.positionAt(0), editor.document.positionAt(editor.document.getText().length));
+        await editor.edit((b) => b.replace(all, original));
+        await editor.document.save();
+        await waitFor("the unit current again", () => unitOf(view, "AccountService.getBalance").freshness === "fresh");
+      }
+    },
+  ],
+  [
     "an unsaved source edit is flagged in the logic document; once saved, the unit is stale",
     async (api) => {
       const view = await logicView(api, SERVICE);
@@ -301,6 +393,8 @@ const tests = [
         "sift.showFlow",
         "sift.showImpact",
         "sift.showImpactOfChanges",
+        "sift.editUnit",
+        "sift.undoEdit",
       ]) {
         assert.ok(all.includes(id), `${id} is registered`);
       }
@@ -321,7 +415,10 @@ async function run() {
   assert.ok(extension, "the extension is installed");
   const api = await waitFor("activation", async () => (extension.isActive ? extension.exports : (await extension.activate(), extension.exports)));
   let failed = 0;
-  for (const [name, test] of tests) {
+  // SIFT_TEST_GREP: run only tests whose name matches (tests build on earlier ones, so include those too).
+  const grep = process.env.SIFT_TEST_GREP ? new RegExp(process.env.SIFT_TEST_GREP) : null;
+  const selected = tests.filter(([n]) => !grep || grep.test(n));
+  for (const [name, test] of selected) {
     try {
       await test(api);
       console.log(`  ✓ ${name}`);
@@ -330,8 +427,8 @@ async function run() {
       console.error(`  ✗ ${name}\n    ${err && err.stack ? err.stack : err}`);
     }
   }
-  if (failed > 0) throw new Error(`${failed} of ${tests.length} integration tests failed`);
-  console.log(`${tests.length} integration tests passed`);
+  if (failed > 0) throw new Error(`${failed} of ${selected.length} integration tests failed`);
+  console.log(`${selected.length} integration tests passed`);
 }
 
 module.exports = { run };

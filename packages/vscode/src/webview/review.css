@@ -1,0 +1,182 @@
+/* The review panel (phase-2-design §8.8), on top of the logic document's styles. */
+
+.review section {
+  border-top: 1px solid var(--vscode-panel-border, var(--vscode-widget-border, transparent));
+  padding: 6px 0 8px;
+}
+.review h2 {
+  font-size: 1em;
+  margin: 4px 0 6px;
+}
+.review h3 {
+  font-size: 1em;
+  font-weight: 600;
+  margin: 6px 0 2px;
+  font-family: var(--vscode-editor-font-family);
+}
+.badge.state-ready {
+  color: var(--vscode-charts-blue, var(--vscode-textLink-foreground));
+}
+.badge.state-applied {
+  color: var(--vscode-testing-iconPassed, var(--vscode-charts-green));
+}
+.badge.state-needs-review,
+.badge.state-failed {
+  color: var(--vscode-editorWarning-foreground);
+}
+.badge.state-rejected,
+.badge.state-undone {
+  color: var(--vscode-descriptionForeground);
+}
+
+.decision {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+}
+.decision .banner {
+  flex-basis: 100%;
+}
+.decision.bottom {
+  border-top: 1px solid var(--vscode-panel-border, var(--vscode-widget-border, transparent));
+  padding-top: 10px;
+}
+
+blockquote.asked {
+  margin: 4px 0;
+  padding: 2px 10px;
+  border-left: 3px solid var(--vscode-textBlockQuote-border);
+  background: var(--vscode-textBlockQuote-background);
+}
+
+.logic-diff {
+  list-style: none;
+  margin: 2px 0 6px;
+  padding-left: 0.6em;
+}
+.logic-diff li {
+  margin: 3px 0;
+}
+.field {
+  font-size: 0.85em;
+  color: var(--vscode-descriptionForeground);
+  margin-right: 4px;
+}
+ins {
+  text-decoration: none;
+  background: var(--vscode-diffEditor-insertedTextBackground);
+  outline: 1px solid var(--vscode-diffEditor-insertedTextBorder, transparent);
+}
+del {
+  background: var(--vscode-diffEditor-removedTextBackground);
+  outline: 1px solid var(--vscode-diffEditor-removedTextBorder, transparent);
+}
+.chip.added {
+  background: var(--vscode-diffEditor-insertedTextBackground);
+  color: var(--vscode-foreground);
+}
+.chip.removed {
+  background: var(--vscode-diffEditor-removedTextBackground);
+  color: var(--vscode-foreground);
+}
+
+.file-diff {
+  margin: 4px 0 10px;
+}
+.file-diff-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.unified-diff {
+  margin: 0;
+  padding: 4px 0;
+  overflow-x: auto;
+  font-family: var(--vscode-editor-font-family);
+  font-size: var(--vscode-editor-font-size, 0.92em);
+  background: var(--vscode-textCodeBlock-background, var(--vscode-textBlockQuote-background));
+  border-radius: 2px;
+}
+.unified-diff > div {
+  padding: 0 8px;
+  white-space: pre;
+}
+.unified-diff .add {
+  background: var(--vscode-diffEditor-insertedLineBackground, var(--vscode-diffEditor-insertedTextBackground));
+}
+.unified-diff .del {
+  background: var(--vscode-diffEditor-removedLineBackground, var(--vscode-diffEditor-removedTextBackground));
+}
+.unified-diff .hunk,
+.unified-diff .meta {
+  color: var(--vscode-descriptionForeground);
+}
+
+.scope {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  margin: 0;
+}
+.scope dt {
+  color: var(--vscode-descriptionForeground);
+}
+.scope dd {
+  margin: 0;
+}
+.route {
+  margin-right: 6px;
+}
+
+.checks,
+.notes {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.check {
+  margin: 2px 0;
+}
+.check-icon {
+  display: inline-block;
+  width: 1.2em;
+  text-align: center;
+}
+.check.passed .check-icon {
+  color: var(--vscode-testing-iconPassed, var(--vscode-charts-green));
+}
+.check.failed .check-icon {
+  color: var(--vscode-testing-iconFailed, var(--vscode-editorError-foreground));
+}
+.check.skipped,
+.check.unavailable {
+  color: var(--vscode-descriptionForeground);
+}
+.check-details {
+  margin: 2px 0 4px 1.6em;
+  max-height: 16em;
+  overflow: auto;
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.9em;
+}
+.checks-run {
+  margin: 6px 0 0;
+}
+.notes li {
+  margin: 3px 0;
+  padding-left: 8px;
+  border-left: 3px solid var(--vscode-editorWarning-foreground);
+}
+.notes li.gap,
+.notes li.unrequested {
+  border-color: var(--vscode-editorError-foreground);
+}
+.also {
+  margin-top: 2px;
+}
+.note-kind {
+  font-weight: 600;
+}

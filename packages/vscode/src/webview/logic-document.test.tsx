@@ -2,7 +2,7 @@
 import { act } from "preact/test-utils";
 import { render } from "preact";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { LogicFile, LogicUnit, SiftUnit } from "@sift/core";
+import type { ChangeRequest, LogicFile, LogicUnit, SiftUnit } from "@sift/core";
 import { LogicDocument } from "./logic-document.js";
 import type { HostMessage, LogicDocumentState, WebviewMessage } from "./protocol.js";
 
@@ -50,10 +50,10 @@ function send(message: HostMessage) {
 }
 
 function show(state: Partial<LogicDocumentState> & { file: LogicFile | null }) {
-  send({ type: "state", state: { source: SOURCE, error: null, dirty: false, ...state } });
+  send({ type: "state", state: { source: SOURCE, error: null, dirty: false, edits: [], provider: null, ...state } });
 }
 
-const $ = (selector: string) => container.querySelector<HTMLElement>(selector);
+const $ = <T extends HTMLElement = HTMLElement>(selector: string) => container.querySelector<T>(selector);
 const $$ = (selector: string) => [...container.querySelectorAll<HTMLElement>(selector)];
 const click = (el: Element | null, init: MouseEventInit = {}) => act(() => void el!.dispatchEvent(new MouseEvent("click", { bubbles: true, ...init })));
 
@@ -106,7 +106,7 @@ describe("LogicDocument", () => {
     click(line, { metaKey: true });
     click(line, { altKey: true });
     act(() => void line.dispatchEvent(new KeyboardEvent("keydown", { key: "F12", bubbles: true })));
-    click($(".unit-header button.secondary"));
+    click($(".unit-header button.verify"));
 
     expect(posted).toEqual([
       { type: "hover", at },
@@ -127,7 +127,7 @@ describe("LogicDocument", () => {
     show({ file: file([stale, verified, edited, review]) });
 
     const badge = (id: string) => $(`[data-unit="${id}"] .badge`)!.textContent;
-    const verify = (id: string) => $(`[data-unit="${id}"] .unit-header button.secondary`);
+    const verify = (id: string) => $(`[data-unit="${id}"] .unit-header button.verify`);
     expect(badge("u_aaaaaaaa")).toBe("Stale");
     expect($('[data-unit="u_aaaaaaaa"] .banner')!.textContent).toContain("the code changed");
     expect(verify("u_aaaaaaaa")).toBeNull();
@@ -196,5 +196,200 @@ describe("LogicDocument", () => {
     expect($(".undescribed")!.textContent).toContain("A.two, Top-level code");
     show({ file: null, error: "src/x.ts is not a source file Sift reads." });
     expect($(".banner.error")!.textContent).toContain("not a source file");
+  });
+});
+
+// ── Editing (phase-2-design §8.1, M15) ─────────────────────────────────────
+
+function changeRequest(unit: SiftUnit, state: ChangeRequest["state"], extra: Partial<ChangeRequest> = {}): ChangeRequest {
+  return {
+    id: "e_aaaaaaaa",
+    unitId: unit.id,
+    file: SOURCE,
+    symbol: unit.symbol,
+    base: { bodyHash: unit.bodyHash, fileHash: "f", description: unit },
+    edits: [],
+    answers: [],
+    state,
+    usage: { inputTokens: 0, outputTokens: 0, costUsd: 0, calls: 0, tasks: {} },
+    createdAt: "",
+    updatedAt: "",
+    ...extra,
+  };
+}
+
+const keydown = (el: Element | null, key: string, init: KeyboardEventInit = {}) => act(() => void el!.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, ...init })));
+const type = (el: HTMLTextAreaElement | HTMLInputElement, text: string) =>
+  act(() => {
+    el.value = text;
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+const drafts = () => posted.filter((m): m is Extract<WebviewMessage, { type: "draft" | "propose" }> => m.type === "draft" || m.type === "propose");
+
+describe("LogicDocument editing", () => {
+  const unit = siftUnit("u_aaaaaaaa", "AccountService.withdraw");
+
+  it("opens a unit for editing, edits a step and the summary in place, and saves each change as a draft", () => {
+    show({ file: file([logicUnit(unit)]), provider: { id: "claude-code", local: false } });
+    expect($(".unit-header button.verify")).not.toBeNull();
+    click($(".unit-header button.edit-unit"));
+    expect($(".unit")!.classList.contains("editing")).toBe(true);
+    expect($(".unit-header button.verify")).toBeNull();
+    expect($(".badge.draft")!.textContent).toBe("Editing");
+    expect($(".edit-panel")!.textContent).toContain("sends this unit and the code around it to claude-code");
+    // Nothing asked yet: Propose is disabled.
+    expect($<HTMLButtonElement>(".edit-panel button")!.disabled).toBe(true);
+
+    // Click a step: it becomes a text box; Enter keeps the text.
+    posted = [];
+    click($('[data-key="u_aaaaaaaa/s_bbbb"] .text'));
+    const box = $<HTMLTextAreaElement>('[data-key="u_aaaaaaaa/s_bbbb"] textarea')!;
+    expect(box.value).toBe("Save the account.");
+    type(box, "Save the account inside a transaction.");
+    keydown(box, "Enter");
+    expect(posted).toEqual([
+      { type: "draft", unitId: "u_aaaaaaaa", edits: [{ op: "set", path: "steps[s_bbbb].text", before: "Save the account.", after: "Save the account inside a transaction." }], request: "", seq: 1 },
+    ]);
+    // The draft shows at once, marked as changed, before the host answers.
+    expect($('[data-key="u_aaaaaaaa/s_bbbb"] .text')!.textContent).toBe("Save the account inside a transaction.");
+    expect($('[data-key="u_aaaaaaaa/s_bbbb"] .mark.changed')).not.toBeNull();
+
+    // Escape cancels.
+    click($(".summary"));
+    const summary = $<HTMLTextAreaElement>(".summary textarea")!;
+    type(summary, "Something else.");
+    keydown(summary, "Escape");
+    expect(drafts()).toHaveLength(1);
+    expect($(".summary")!.textContent).toBe("Summary of AccountService.withdraw.");
+  });
+
+  it("adds a step after one and inside an if, removes one, and restores it", () => {
+    show({ file: file([logicUnit(unit)]) });
+    click($(".unit-header button.edit-unit"));
+    click($('[data-key="u_aaaaaaaa/s_cccc"] button[aria-label="Add a step after"]'));
+    const box = $<HTMLTextAreaElement>(".new-step textarea")!;
+    type(box, "Send a receipt.");
+    keydown(box, "Enter");
+    const add = drafts().at(-1)!.edits[0]!;
+    expect(add).toMatchObject({ op: "add", text: "Send a receipt.", after: "s_cccc" });
+    expect($$(".unit-body > .steps > li > .step-line .text").map((e) => e.textContent)).toEqual(["If the amount is not positive, reject it.", "Save the account.", "Update the row.", "Send a receipt."]);
+    expect($(".step.added .mark.added")!.textContent).toBe("new");
+
+    click($('[data-key="u_aaaaaaaa/s_aaaa"] button[aria-label="Add a step inside"]'));
+    const inner = $<HTMLTextAreaElement>(".new-step.nested textarea")!;
+    type(inner, "Log the refusal.");
+    keydown(inner, "Enter");
+    expect(drafts().at(-1)!.edits[1]).toMatchObject({ op: "add", text: "Log the refusal.", parent: "s_aaaa" });
+
+    click($('[data-key="u_aaaaaaaa/s_bbbb"] button[aria-label="Remove step"]'));
+    expect(drafts().at(-1)!.edits.at(-1)).toEqual({ op: "delete", step: "s_bbbb" });
+    expect($('[data-key="u_aaaaaaaa/s_bbbb"]')).toBeNull();
+    expect($(".deleted-steps")!.textContent).toContain("Save the account.");
+    click($(".deleted-steps button"));
+    expect(drafts().at(-1)!.edits.some((e) => e.op === "delete")).toBe(false);
+  });
+
+  it("writes a request, proposes the draft with it, and drops its own copy once the host confirms", () => {
+    show({ file: file([logicUnit(unit)]) });
+    click($(".unit-header button.edit-unit"));
+    const request = $<HTMLTextAreaElement>("textarea.request")!;
+    type(request, "Reject amounts of zero or less.");
+    expect(drafts()).toEqual([]); // typing alone saves nothing
+    act(() => void request.dispatchEvent(new FocusEvent("blur")));
+    expect(drafts()).toEqual([{ type: "draft", unitId: "u_aaaaaaaa", edits: [], request: "Reject amounts of zero or less.", seq: 2 }]);
+    click($(".edit-panel button"));
+    expect(posted.at(-1)).toEqual({ type: "propose", unitId: "u_aaaaaaaa", edits: [], request: "Reject amounts of zero or less.", seq: 3 });
+
+    // The host saved it and is planning; the stored request is shown with progress and Cancel.
+    const req = changeRequest(unit, "draft", { request: "Reject amounts of zero or less." });
+    show({ file: file([logicUnit(unit)]), edits: [{ request: req, activity: "planning" }] });
+    send({ type: "draftSaved", unitId: "u_aaaaaaaa", seq: 3 });
+    expect($(".edit-panel.running")!.textContent).toContain("Planning the change");
+    expect($(".badge.draft")!.textContent).toBe("Proposing…");
+    expect($("textarea.request")).toBeNull();
+    click($(".edit-panel.running button"));
+    expect(posted.at(-1)).toEqual({ type: "cancel", id: "e_aaaaaaaa" });
+  });
+
+  it("asks the plan's questions and sends the answers", () => {
+    const req = changeRequest(unit, "needs-answers", {
+      request: "Don't let people overdraw.",
+      questions: [
+        { id: "q1", text: "What should happen when the balance is too low?", options: ["Throw an error", "Return the account unchanged"] },
+        { id: "q2", text: "Should overdraft limits apply?", options: [] },
+      ],
+    });
+    show({ file: file([logicUnit(unit)]), edits: [{ request: req, activity: null }] });
+    expect($(".badge.draft")!.textContent).toBe("Questions");
+    const submit = $<HTMLButtonElement>('.questions button[type="submit"]')!;
+    expect(submit.disabled).toBe(true);
+    click($('input[value="Throw an error"]'));
+    type($<HTMLInputElement>('.question:nth-of-type(2) input[type="text"]')!, "No");
+    expect(submit.disabled).toBe(false);
+    act(() => void $(".questions")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    expect(posted.at(-1)).toEqual({
+      type: "answer",
+      id: "e_aaaaaaaa",
+      answers: [
+        { questionId: "q1", answer: "Throw an error" },
+        { questionId: "q2", answer: "No" },
+      ],
+    });
+  });
+
+  it("offers the review for a ready change, shows failures, and re-plans a change whose code moved", () => {
+    const edits = [{ op: "set" as const, path: "summary", before: unit.summary, after: "Takes money out, if positive." }];
+    const ready = changeRequest(unit, "ready", {
+      edits,
+      plan: { kind: "behavior", interpretation: "Reject non-positive amounts first.", questions: [], warnings: [], allowedUnits: [], helpers: [], examples: [], broader: null },
+      proposal: {
+        kind: "behavior",
+        files: [{ path: SOURCE, beforeHash: "", beforeFileHash: "", afterFileHash: "", text: "", diff: "" }],
+        units: [],
+        newUnits: [],
+        scope: { changed: [`${SOURCE}#AccountService.withdraw`], allowed: [], affected: { units: [], routes: [] }, broader: { reason: "Two callers change too.", units: [] } },
+        checks: [],
+        effects: { added: [], removed: [] },
+        verify: { satisfied: false, gaps: ["Zero is still allowed."], unrequested: [] },
+        warnings: [],
+        notes: "",
+      },
+    });
+    show({ file: file([logicUnit(unit)]), edits: [{ request: ready, activity: null }] });
+    // The draft is shown in the document, still editable.
+    expect($(".summary")!.textContent).toContain("Takes money out, if positive.");
+    expect($(".summary")!.classList.contains("changed")).toBe(true);
+    const panel = $(".edit-panel")!;
+    expect(panel.textContent).toContain("Reject non-positive amounts first.");
+    expect(panel.textContent).toContain("Reaches beyond this unit: Two callers change too.");
+    expect(panel.textContent).toContain("may not do everything you asked");
+    click(panel.querySelector(".ready button"));
+    expect(posted.at(-1)).toEqual({ type: "review", id: "e_aaaaaaaa" });
+
+    show({ file: file([logicUnit(unit)]), edits: [{ request: changeRequest(unit, "failed", { request: "x", error: { message: "The code did not type-check after one retry.", details: ["src/a.ts:3 TS2322"] } }), activity: null }] });
+    expect($(".edit-panel .banner.error")!.textContent).toContain("did not type-check");
+    expect($(".edit-panel .banner.error li")!.textContent).toBe("src/a.ts:3 TS2322");
+    expect($$(".edit-panel button").map((b) => b.textContent)).toContain("Propose again");
+
+    show({ file: file([logicUnit(unit)]), edits: [{ request: changeRequest(unit, "needs-review", { edits, request: "Reject negatives", review: "The code changed since this edit was written." }), activity: null }] });
+    expect($(".edit-panel.needs-review")!.textContent).toContain("The code changed since this edit was written.");
+    expect($(".edit-panel.needs-review")!.textContent).toContain("You asked for “Reject negatives” and 1 edit to the description.");
+    // Shown against the current code, not editable.
+    expect($(".summary")!.textContent).toBe(unit.summary);
+    expect($(".unit")!.classList.contains("editing")).toBe(false);
+    click($(".edit-panel.needs-review button"));
+    expect(posted.at(-1)).toEqual({ type: "replan", id: "e_aaaaaaaa" });
+    click($$(".edit-panel.needs-review button")[1]!);
+    expect(posted.at(-1)).toEqual({ type: "discard", id: "e_aaaaaaaa" });
+  });
+
+  it("offers Edit only on fresh units, and opens one for editing when the host asks", () => {
+    show({ file: file([logicUnit(unit, { freshness: "code-changed" }), logicUnit(siftUnit("u_bbbbbbbb", "B.b", { status: "stale" }), { status: "stale" }), logicUnit(siftUnit("u_cccccccc", "C.c", { lite: true }))]) });
+    expect($('[data-unit="u_aaaaaaaa"] .edit-unit')).toBeNull();
+    expect($('[data-unit="u_bbbbbbbb"] .edit-unit')).toBeNull();
+    expect($('[data-unit="u_cccccccc"]')!.classList.contains("collapsed")).toBe(true);
+    send({ type: "edit", unitId: "u_cccccccc" });
+    expect($('[data-unit="u_cccccccc"]')!.classList.contains("collapsed")).toBe(false);
+    expect($('[data-unit="u_cccccccc"]')!.classList.contains("editing")).toBe(true);
   });
 });

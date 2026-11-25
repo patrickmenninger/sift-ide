@@ -62,8 +62,11 @@ export interface Requests {
   "sift/edit/propose": { params: { id: string; token?: string }; result: ChangeRequest };
   "sift/edit/answer": { params: { id: string; answers: { questionId: string; answer: string }[] }; result: ChangeRequest };
   "sift/edit/runChecks": { params: { id: string }; result: ChangeRequest };
-  /** With `sourceWritten`, the client already wrote the source (through its own undo stack); only descriptions are written. */
-  "sift/edit/apply": { params: { id: string; confirmBroader?: boolean; sourceWritten?: boolean }; result: { request: ChangeRequest; written: string[] } };
+  /**
+   * With `sourceWritten`, the client already wrote the source (through its own undo stack); only
+   * descriptions are written. `sourceBefore` (path → the text it replaced) lets `undo` restore the source too.
+   */
+  "sift/edit/apply": { params: { id: string; confirmBroader?: boolean; sourceWritten?: boolean; sourceBefore?: Record<string, string> }; result: { request: ChangeRequest; written: string[] } };
   "sift/edit/reject": { params: { id: string }; result: ChangeRequest };
   "sift/edit/rebase": { params: { id: string }; result: ChangeRequest };
   "sift/edit/undo": { params: { id: string }; result: { request: ChangeRequest; restored: string[] } };

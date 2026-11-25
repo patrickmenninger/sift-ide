@@ -194,6 +194,8 @@ const OPEN_STATES: EditState[] = ["draft", "needs-answers", "ready", "failed"];
 export class EditService {
   /** Requests whose pipeline is running in this process. */
   private readonly running = new Set<string>();
+  /** Writes per request, one at a time (see `checkPending`). */
+  private readonly writing = new Map<string, Promise<unknown>>();
 
   constructor(private readonly host: EditHost) {}
 
@@ -349,10 +351,17 @@ export class EditService {
         }
       }
       if (!reason) continue;
-      req.state = "needs-review";
-      req.review = reason;
-      await this.save(req);
-      marked.push(req.id);
+      // The check awaited the code; another operation (a reject, an update) may have written the
+      // request since it was read. Mark it only if it is unchanged, so a stale copy never wins.
+      const marks = await this.exclusive(req.id, async () => {
+        const now = await this.load(req.id).catch(() => null);
+        if (!now || now.updatedAt !== req.updatedAt || now.state !== req.state) return false;
+        req.state = "needs-review";
+        req.review = reason;
+        await this.write(req);
+        return true;
+      });
+      if (marks) marked.push(req.id);
     }
     if (marked.length > 0) this.host.changed(marked, "edits");
     return marked;
@@ -426,9 +435,11 @@ export class EditService {
    * text the proposal was made from just before writing. `confirmBroader` is required when the
    * change reaches beyond the edited unit. With `sourceWritten`, the client (the editor, through its
    * own undo stack) has already written the source files; they are checked to hold exactly the
-   * proposed text, and only the descriptions are written here.
+   * proposed text, and only the descriptions are written here. `sourceBefore` gives the text the
+   * client replaced in each file, so `undo` can restore the source too; it must be the text the
+   * proposal was made from.
    */
-  async apply(id: string, options: { confirmBroader?: boolean; sourceWritten?: boolean } = {}): Promise<{ request: ChangeRequest; written: string[] }> {
+  async apply(id: string, options: { confirmBroader?: boolean; sourceWritten?: boolean; sourceBefore?: Record<string, string> } = {}): Promise<{ request: ChangeRequest; written: string[] }> {
     const req = await this.get(id);
     this.expectState(req, ["ready"], "applied");
     const proposal = req.proposal!;
@@ -443,6 +454,11 @@ export class EditService {
         const now = await readFile(join(root, f.path), "utf8").catch(() => null);
         if (options.sourceWritten) {
           if (now !== f.text) throw new SiftError("EDIT_CONFLICT", `${f.path} does not hold the proposed change.`);
+          const before = options.sourceBefore?.[f.path];
+          if (before !== undefined) {
+            if (textHash(before) !== f.beforeHash) throw new SiftError("EDIT_CONFLICT", `The text given as ${f.path} before the change is not the text the change was proposed for.`);
+            texts.set(f.path, before);
+          }
           continue;
         }
         if (now === null || textHash(now) !== f.beforeHash) throw new SiftError("EDIT_CONFLICT", `${f.path} changed since this change was proposed; propose it again.`);
@@ -473,7 +489,8 @@ export class EditService {
       }
 
       // Write sources, then descriptions; record every pre-image first so a failure can be undone.
-      for (const f of proposal.files) if (!options.sourceWritten) record.files.push({ path: f.path, before: texts.get(f.path)!, afterHash: textHash(f.text) });
+      // With `sourceWritten`, a source is recorded only when the client said what it replaced.
+      for (const f of proposal.files) if (texts.has(f.path)) record.files.push({ path: f.path, before: texts.get(f.path)!, afterHash: textHash(f.text) });
       for (const [source, { before }] of siftFiles) record.files.push({ path: siftPathFor(source), before, afterHash: "" });
       const out: string[] = [];
       for (const f of proposal.files) {
@@ -554,7 +571,21 @@ export class EditService {
     return req;
   }
 
-  private async save(req: ChangeRequest): Promise<void> {
+  private save(req: ChangeRequest): Promise<void> {
+    return this.exclusive(req.id, () => this.write(req));
+  }
+
+  /** Run `task` while no other write to the request runs. */
+  private exclusive<T>(id: string, task: () => Promise<T>): Promise<T> {
+    const previous = this.writing.get(id) ?? Promise.resolve();
+    const next = previous.then(task, task);
+    const settled = next.catch(() => undefined);
+    this.writing.set(id, settled);
+    void settled.then(() => this.writing.get(id) === settled && this.writing.delete(id));
+    return next;
+  }
+
+  private async write(req: ChangeRequest): Promise<void> {
     req.updatedAt = new Date().toISOString();
     await mkdir(join(this.host.root, EDITS_DIR), { recursive: true });
     await writeFileAtomic(join(this.host.root, EDITS_DIR, `${req.id}.json`), `${JSON.stringify(req, null, 2)}\n`);
