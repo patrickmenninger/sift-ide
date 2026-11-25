@@ -3,3 +3,7 @@ export * from "./judge.js";
 export * from "./metrics.js";
 export * from "./report.js";
 export * from "./run.js";
+export * from "./edit-cases.js";
+export * from "./edit-eval.js";
+export * from "./edit-judge.js";
+export * from "./edit-report.js";

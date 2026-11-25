@@ -8,7 +8,7 @@ import { typescriptAdapter } from "@sift/adapter-typescript";
 import { claudeCodeProvider } from "@sift/provider-claude-code";
 import { serve } from "@sift/server";
 import { serveMcp } from "@sift/mcp";
-import { DEFAULT_CONFIG, loadMatrix, renderMarkdown, runEval, writeResults, type MatrixConfig } from "@sift/eval";
+import { DEFAULT_CONFIG, loadMatrix, renderEditMarkdown, renderMarkdown, runEditEval, runEval, targetsMissed, writeResults, type MatrixConfig } from "@sift/eval";
 import { registerEdit } from "./edit-command.js";
 import { renderGenerateReport, renderModels, renderPlan, renderStatus } from "./generate-render.js";
 import { renderCallees, renderCallers, renderFlow, renderImpact } from "./graph-render.js";
@@ -367,9 +367,11 @@ export function buildProgram(io: CliIO = processIO, deps: CliDeps = {}): Command
 
   program
     .command("eval")
-    .description("Run the evaluation harness on a fixture: generate, score against expectations, judge, and measure churn (from a Sift source checkout)")
+    .description("Run the evaluation harness on a fixture: generate, score against expectations, judge, and measure churn; or, with --edits, evaluate natural-language editing (from a Sift source checkout)")
     .option("--fixture <name>", "fixture under eval/fixtures", "bank-app")
-    .option("--matrix", "run every configuration in eval/matrix.yaml")
+    .option("--edits", "evaluate editing: run the change requests in eval/edits/<fixture>.yaml up to review")
+    .option("--case <id...>", "with --edits: run only these cases")
+    .option("--matrix", "run every configuration in eval/matrix.yaml (its edits list with --edits)")
     .option("--repeat <n>", "runs per configuration (default 1, or 3 with --matrix)")
     .option("--tier <task=tier...>", "run tasks on other tiers, e.g. --tier describe=mid")
     .option("--no-judge", "skip the AI judge (no mention or accuracy scores)")
@@ -382,11 +384,29 @@ export function buildProgram(io: CliIO = processIO, deps: CliDeps = {}): Command
       if (!existsSync(join(evalDir, "fixtures"))) {
         throw new SiftError("SOURCE_NOT_FOUND", `No evaluation fixtures in ${evalDir}. "sift eval" runs from a Sift source checkout, or with --eval-dir.`);
       }
-      let configs: MatrixConfig[] = opts.matrix ? await loadMatrix(evalDir) : [DEFAULT_CONFIG];
+      let configs: MatrixConfig[] = opts.matrix ? await loadMatrix(evalDir, opts.edits ? "edits" : "configs") : [DEFAULT_CONFIG];
       if (opts.tier) configs = [{ name: opts.tier.join(","), tasks: parseTiers(opts.tier) }];
       const repeat = opts.repeat === undefined ? (opts.matrix ? 3 : 1) : depthOf(opts.repeat);
       const provider = providerFor("claude-code", deps);
       const log = opts.json ? () => {} : (line: string) => io.out(line);
+      const nodeModules = existsSync(join(SOURCE_ROOT, "node_modules")) ? { nodeModules: join(SOURCE_ROOT, "node_modules") } : {};
+      if (opts.edits) {
+        log(`Evaluating edits on ${opts.fixture}: ${configs.map((c) => c.name).join(", ")}, ${repeat} run${repeat === 1 ? "" : "s"} each${opts.judge ? "" : ", no judge"}.`);
+        const result = await runEditEval({
+          evalDir, fixture: opts.fixture, adapters: ADAPTERS, builtinRulesDir: builtinRulesDir(), provider, configs, repeat, judge: opts.judge,
+          ...(opts.case ? { only: opts.case } : {}), ...nodeModules, onProgress: log,
+        });
+        const markdown = renderEditMarkdown(result);
+        const saved = opts.save ? await writeResults(join(evalDir, "results"), result, markdown, "-edits") : null;
+        if (opts.json) {
+          io.out(JSON.stringify(result, null, 2));
+          return;
+        }
+        io.out(["", ...markdown.split("\n## ")[0]!.trimEnd().split("\n").slice(2)].join("\n"));
+        if (saved) io.out(`\nResults: ${relative(process.cwd(), saved.markdown)} (details per case) and ${relative(process.cwd(), saved.json)}`);
+        if (result.summary.some((s) => targetsMissed(s).length > 0) && deps.state) deps.state.exitCode = EXIT.problems;
+        return;
+      }
       log(`Evaluating ${opts.fixture}: ${configs.map((c) => c.name).join(", ")}, ${repeat} run${repeat === 1 ? "" : "s"} each${opts.judge ? "" : ", no judge"}${opts.churn ? "" : ", no churn"}.`);
       const result = await runEval({
         evalDir,
@@ -398,7 +418,7 @@ export function buildProgram(io: CliIO = processIO, deps: CliDeps = {}): Command
         repeat,
         judge: opts.judge,
         churn: opts.churn,
-        ...(existsSync(join(SOURCE_ROOT, "node_modules")) ? { nodeModules: join(SOURCE_ROOT, "node_modules") } : {}),
+        ...nodeModules,
         onProgress: log,
       });
       const markdown = renderMarkdown(result);
@@ -429,6 +449,8 @@ interface GraphOpts {
 
 interface EvalOpts {
   fixture: string;
+  edits?: boolean;
+  case?: string[];
   matrix?: boolean;
   repeat?: string;
   tier?: string[];

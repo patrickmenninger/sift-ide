@@ -69,7 +69,7 @@ models:
       "include: must contain at least one pattern",
       "concurrency: must be a positive whole number",
       "models.tasks.describe: must be one of frontier, mid, small",
-      "models.tasks.summarize: unknown task (expected one of describe, describe-lite, update, context-check, judge, edit-plan, edit-code, edit-verify)",
+      "models.tasks.summarize: unknown task (expected one of describe, describe-lite, update, context-check, judge, edit-plan, edit-code, edit-verify, edit-judge)",
       "models.tiers.small.model: must be a non-empty string",
       "models.tiers.mid.effort: must be one of low, medium, high, xhigh, max",
     ]);

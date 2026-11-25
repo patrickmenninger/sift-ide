@@ -1,0 +1,205 @@
+# Scripted change requests for the edit evaluation (phase-2-design §9). `sift eval --edits` describes
+# a copy of the fixture, then runs each case through the edit pipeline (plan → code → validate →
+# re-derive → intent check) without applying anything, and scores the proposal.
+#
+# A case names a unit ("file#Symbol") and what the person asks for, in any combination of:
+#   request:  free-form text
+#   set:      [{ step: <code>, text }]   rewrite the step that covers this code
+#   summary / returns: text,  inputs: { name: text }
+#   add:      [{ after: <code> | first: true | inside: <code>, text }]
+#   delete:   [<code>]                   delete the step that covers this code
+# Steps are found by a piece of their code, since step IDs differ between runs: the step that
+# covers the innermost statement containing the text.
+#   answers:  what the person would answer to any question (each question gets all of them).
+#
+# expect:
+#   kind: behavior | reword               what the plan should decide
+#   reword: true | false                  true: accepted as a reword, no code; false: never accepted as one
+#   changedUnits: [Symbol | file#Symbol]  exactly the units whose code changes (targeted)
+#   broader: true | false                 whether the change must be flagged as reaching beyond the unit
+#   effectsAdded / effectsRemoved: [...]  effects that must appear / disappear
+#   asks: [topic]                         questions that must be asked (matched by the judge)
+#   questionsOk: true                     questions are neither expected nor counted against precision
+#   mustMention: [idea]                   what the change must do (judged on the code and new description)
+fixture: bank-app
+cases:
+  # ---- step rewrites
+  - id: deposit-lower-limit
+    unit: src/accounts/account-service.ts#AccountService.deposit
+    set:
+      - step: "amountCents > 10_000_000"
+        text: "Reject amounts that are zero or negative, or above $5,000."
+    expect:
+      kind: behavior
+      changedUnits: [AccountService.deposit]
+      broader: false
+      mustMention:
+        - rejects deposits above 5,000 dollars (500,000 cents)
+        - still rejects zero or negative amounts
+
+  - id: retry-five-times
+    unit: src/notifications/notifier.ts#onTransferCompleted
+    set:
+      - step: "while (attempts < 3)"
+        text: "Try to append the line to the log file up to five times, stopping at the first success."
+    expect:
+      kind: behavior
+      changedUnits: [onTransferCompleted]
+      broader: false
+      mustMention:
+        - tries up to five times
+
+  - id: transfer-transaction
+    unit: src/accounts/account-service.ts#AccountService.transferFunds
+    set:
+      - step: "await this.repo.save(from);"
+        text: "Save both accounts inside one database transaction."
+    answers: ["Add what the repository needs to save several accounts in one transaction; keep the in-memory repository working."]
+    expect:
+      kind: behavior
+      broader: true
+      questionsOk: true
+      mustMention:
+        - both accounts are saved together, so either both balances change or neither does
+
+  # ---- added and deleted steps
+  - id: transfer-positive-amount
+    unit: src/accounts/account-service.ts#AccountService.transferFunds
+    add:
+      - after: "if (from.ownerId !== userId)"
+        text: "Stop with a validation error if the amount is zero or negative."
+    expect:
+      kind: behavior
+      changedUnits: [AccountService.transferFunds]
+      broader: false
+      mustMention:
+        - rejects a zero or negative amount with a validation error before changing any balance
+
+  - id: transfer-no-event
+    unit: src/accounts/account-service.ts#AccountService.transferFunds
+    delete: ["this.events.emit("]
+    expect:
+      kind: behavior
+      changedUnits: [AccountService.transferFunds]
+      broader: false
+      mustMention:
+        - no longer emits the transfer completed event
+        - everything else is unchanged
+
+  - id: deposit-event
+    unit: src/accounts/account-service.ts#AccountService.deposit
+    add:
+      - after: "await this.repo.save(account);"
+        text: "Emit a deposit.completed event with the account ID and the amount."
+    expect:
+      kind: behavior
+      changedUnits: [AccountService.deposit]
+      broader: false
+      mustMention:
+        - emits deposit.completed with the account ID and amount after saving
+
+  # ---- free-form requests
+  - id: withdraw-positive
+    unit: src/accounts/account-service.ts#AccountService.withdraw
+    request: "Reject withdrawals of zero or less with a validation error."
+    expect:
+      kind: behavior
+      changedUnits: [AccountService.withdraw]
+      broader: false
+      mustMention:
+        - rejects an amount of zero or less with a validation error
+
+  - id: transfer-same-account
+    unit: src/accounts/account-service.ts#AccountService.transferFunds
+    request: "Refuse transfers where the source and destination are the same account."
+    answers: ["Stop with a validation error before changing anything."]
+    expect:
+      kind: behavior
+      changedUnits: [AccountService.transferFunds]
+      broader: false
+      questionsOk: true
+      mustMention:
+        - refuses with an error when the source and destination are the same account, before changing any balance
+
+  - id: prisma-save-currency
+    unit: src/accounts/prisma-account-repository.ts#PrismaAccountRepository.save
+    request: "Also store the account's currency when saving."
+    expect:
+      kind: behavior
+      changedUnits: [PrismaAccountRepository.save]
+      broader: false
+      mustMention:
+        - the database update writes the currency as well as the balance
+
+  - id: interest-negative-rate
+    unit: src/accounts/money.ts#applyMonthlyInterest
+    request: "Throw an error when the annual rate is negative."
+    expect:
+      kind: behavior
+      changedUnits: [applyMonthlyInterest]
+      broader: false
+      questionsOk: true
+      mustMention:
+        - throws when the annual rate is negative
+
+  # ---- ambiguous requests
+  - id: withdraw-overdraw
+    unit: src/accounts/account-service.ts#AccountService.withdraw
+    request: "Don't let people overdraw."
+    answers: ["Stop with a validation error and change nothing."]
+    expect:
+      kind: behavior
+      asks:
+        - what happens when the balance is too low
+      changedUnits: [AccountService.withdraw]
+      mustMention:
+        - refuses with a validation error when the balance is lower than the amount, without saving
+
+  - id: deposit-limit-vague
+    unit: src/accounts/account-service.ts#AccountService.deposit
+    request: "Make the deposit limit match the comment."
+    expect:
+      kind: behavior
+      changedUnits: [AccountService.deposit]
+      questionsOk: true
+      mustMention:
+        - rejects deposits above 10,000 dollars (1,000,000 cents)
+
+  # ---- a type change that reaches callers
+  - id: format-bigint
+    unit: src/accounts/money.ts#formatCents
+    request: "Take the amount as a bigint number of cents instead of a number."
+    answers: ["Convert at the call sites; keep the output format the same."]
+    expect:
+      kind: behavior
+      broader: true
+      changedUnits: [formatCents, src/ui/balance-card.tsx#BalanceCard]
+      questionsOk: true
+      mustMention:
+        - formatCents takes a bigint
+        - BalanceCard passes a bigint
+        - the output format is unchanged
+
+  # ---- rewordings
+  - id: reword-summary
+    unit: src/accounts/account-service.ts#AccountService.withdraw
+    summary: "Takes money out of one of the user's own accounts and returns the updated account."
+    expect: { kind: reword, reword: true }
+
+  - id: reword-step
+    unit: src/accounts/account-service.ts#AccountService.lowBalanceAccounts
+    set:
+      - step: "result.push(account.id);"
+        text: "Remember this account's ID."
+    expect: { kind: reword, reword: true }
+
+  - id: reword-input
+    unit: src/accounts/account-service.ts#AccountService.transferFunds
+    inputs:
+      amountCents: "How much money to move, in whole cents."
+    expect: { kind: reword, reword: true }
+
+  - id: reword-false
+    unit: src/accounts/account-service.ts#AccountService.getBalance
+    returns: "The account's balance in dollars."
+    expect: { reword: false, questionsOk: true }
